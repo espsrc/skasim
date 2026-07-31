@@ -72,6 +72,7 @@ DIAMETERS = {
     "APEX": 12 * u.m,
     "ATCA": 22 * u.m,
     "CARMA": 10.4 * u.m,
+    "e-MERLIN": 25 * u.m,
     "GBT": 100 * u.m,
     "GMRT": 45 * u.m,
     "IRAM30M": 30 * u.m,
