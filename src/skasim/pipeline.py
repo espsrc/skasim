@@ -37,6 +37,7 @@ from .loaders import (
     write_sky_composition_preview,
 )
 from .manifest import RunContext, create_run_context
+from .noise import inject_noise, load_sefd_file
 from .primary_beam import GaussianStationBeam, angular_separation_deg, simulation_beam
 from .runtime import require_karabo_module
 from .sky import SkyModel, Source
@@ -827,21 +828,27 @@ def run_simulation(
         "use_gpus": False,
     }
     if config.rms or (config.noise_rms_start is not None):
-        params["noise_enable"] = True
-        # "Observation settings" avoids OSKAR segfault: "Telescope model"
-        # triggers oskar_settings_to_telescope which dereferences a null
-        # ionosphere screen object when noise_rms="Range".
-        params["noise_freq"] = "Observation settings"
-        if config.noise_rms_start is not None:
-            # numeric station RMS override (calibration recipe)
-            start = config.noise_rms_start
-            end = config.noise_rms_end if config.noise_rms_end is not None else start
-            params["noise_rms"] = "Range"
-            params["noise_rms_start"] = start
-            params["noise_rms_end"] = end
-            logger.info(f"noise_rms override: Range {start:.6e} – {end:.6e} Jy")
+        if config.noise_injection.enabled:
+            logger.warning(
+                "noise_injection.enabled=true; ignoring OSKAR noise parameters "
+                "(rms/noise_rms_start) and simulating noiselessly."
+            )
         else:
-            params["noise_rms"] = "Telescope model"
+            params["noise_enable"] = True
+            # "Observation settings" avoids OSKAR segfault: "Telescope model"
+            # triggers oskar_settings_to_telescope which dereferences a null
+            # ionosphere screen object when noise_rms="Range".
+            params["noise_freq"] = "Observation settings"
+            if config.noise_rms_start is not None:
+                # numeric station RMS override (calibration recipe)
+                start = config.noise_rms_start
+                end = config.noise_rms_end if config.noise_rms_end is not None else start
+                params["noise_rms"] = "Range"
+                params["noise_rms_start"] = start
+                params["noise_rms_end"] = end
+                logger.info(f"noise_rms override: Range {start:.6e} – {end:.6e} Jy")
+            else:
+                params["noise_rms"] = "Telescope model"
 
     simulation = interferometer_module.InterferometerSimulation(**params)
     simulation.run_simulation(
@@ -857,6 +864,58 @@ def run_simulation(
         str(visibility_path.relative_to(ctx.work_dir)),
     )
     return visibility_path
+
+
+def _run_noise_injection(
+    ctx: RunContext,
+    visibility_path: Path,
+    freq: u.Quantity,
+) -> None:
+    """Inject realistic per-baseline thermal noise into the visibility MS."""
+    config = ctx.config
+    ctx.add_milestone("noise_injection_started", "started")
+    t0 = time.time()
+    try:
+        sefd_file = config.noise_injection.sefd_file
+        if sefd_file is None:
+            raise ValueError("noise_injection.sefd_file is required when enabled=true")
+        sefd_path = Path(sefd_file).expanduser()
+        sefd_antennas = load_sefd_file(sefd_path)
+
+        delta_nu_mhz = config.observation.channel_width_mhz
+        if delta_nu_mhz is None:
+            raise ValueError("observation.channel_width_mhz is required for noise injection")
+        delta_nu_hz = delta_nu_mhz * 1e6
+        logger.info(
+            f"Injecting thermal noise: SEFD={sefd_path.name}, "
+            f"eta_c={config.noise_injection.eta_c}, "
+            f"delta_nu={delta_nu_hz/1e6:.3f} MHz"
+        )
+        summary = inject_noise(
+            ms_path=visibility_path,
+            sefd_antennas=sefd_antennas,
+            delta_nu_hz=delta_nu_hz,
+            eta_c=config.noise_injection.eta_c,
+        )
+        ctx.add_milestone(
+            "noise_injection_completed",
+            "completed",
+            elapsed_s=time.time() - t0,
+            details={
+                "sefd_file": str(sefd_path),
+                "eta_c": config.noise_injection.eta_c,
+                "delta_nu_hz": delta_nu_hz,
+                "summary": summary,
+            },
+        )
+    except Exception as exc:
+        ctx.add_milestone(
+            "noise_injection_failed",
+            "failed",
+            elapsed_s=time.time() - t0,
+            details={"error": str(exc)},
+        )
+        raise
 
 
 def _run_uv_coverage(ctx: RunContext, visibility_path: Path) -> None:
@@ -1164,7 +1223,7 @@ def run(config: SimConfig) -> None:
         logger.info(f"DeltaFreq : {delta_freq.to(u.MHz).value:.3f} MHz")
         logger.info(f"N channels: {n_channels}")
 
-        # phase 1: simulation
+        # phase 1: simulation (includes model injection)
         visibility_path = _run_simulation_phase(
             ctx,
             telescope,
@@ -1174,6 +1233,10 @@ def run(config: SimConfig) -> None:
             simulation_fov,
             effective_images,
         )
+
+        # realistic thermal-noise injection (post-simulation, post-model injection)
+        if config.noise_injection.enabled:
+            _run_noise_injection(ctx, visibility_path, freq)
 
         # UV coverage (shadeMS) — once per run, before imaging
         if config.uv_coverage:

@@ -238,6 +238,34 @@ ModelEntry = Annotated[
 
 
 # --------------------------------------------------------------------------- #
+# NoiseInjectionConfig
+# --------------------------------------------------------------------------- #
+
+
+class NoiseInjectionConfig(BaseModel):
+    """Realistic thermal-noise injection parameters.
+
+    When enabled, OSKAR simulates without noise and this module injects
+    per-baseline Gaussian noise computed from per-antenna SEFDs using the
+    radiometer equation (Radcliffe et al. 2024, eq. 1).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    sefd_file: Optional[str] = None
+    eta_c: float = Field(0.88, gt=0.0)
+
+    @model_validator(mode="after")
+    def _sefd_file_required_when_enabled(self):
+        if self.enabled and self.sefd_file is None:
+            raise ValueError("noise_injection.sefd_file is required when enabled=true")
+        if self.sefd_file is not None:
+            _require_existing_path(self.sefd_file)
+        return self
+
+
+# --------------------------------------------------------------------------- #
 # ObsConfig
 # --------------------------------------------------------------------------- #
 
@@ -465,6 +493,9 @@ class SimConfig(BaseModel):
     noise_rms_start: Optional[float] = None
     noise_rms_end: Optional[float] = None
 
+    # realistic thermal-noise injection (post-simulation)
+    noise_injection: NoiseInjectionConfig = Field(default_factory=NoiseInjectionConfig)
+
     # nested configs
     observation: ObsConfig = ObsConfig()
     imaging: list[ImgConfig] = Field(default_factory=lambda: [ImgConfig()])
@@ -619,6 +650,17 @@ class SimConfig(BaseModel):
     def _require_at_least_one_imaging(self):
         if not self.imaging:
             raise ValueError("at least one imaging block is required")
+        return self
+
+    @model_validator(mode="after")
+    def _noisy_simulation_and_noise_injection_are_mutually_exclusive(self):
+        if self.noise_injection.enabled and (
+            self.rms or self.noise_rms_start is not None
+        ):
+            raise ValueError(
+                "noise_injection.enabled cannot be combined with OSKAR noise "
+                "(rms=true or noise_rms_start). Use one or the other."
+            )
         return self
 
     @field_validator("uv_coverage_canvas_size")

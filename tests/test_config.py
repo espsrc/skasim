@@ -687,3 +687,54 @@ def test_resolve_spectral_mode(tmp_path, imager, mode, with_cube, expected):
     cfg = SimConfig(models=models, imaging=[img])
 
     assert resolve_spectral_mode(cfg.imaging[0], cfg) == expected
+
+
+# ---------------------------------------------------------------------------
+# NoiseInjectionConfig
+# ---------------------------------------------------------------------------
+
+
+def test_noise_injection_defaults():
+    """Noise injection is disabled by default."""
+    cfg = SimConfig()
+    assert cfg.noise_injection.enabled is False
+    assert cfg.noise_injection.sefd_file is None
+    assert cfg.noise_injection.eta_c == pytest.approx(0.88)
+
+
+def test_noise_injection_accepts_nested_config(tmp_path):
+    """Noise injection can be enabled through a nested block."""
+    sefd_path = tmp_path / "sefd.json"
+    sefd_path.write_text('{"telescope": "T", "band": "L", "antennas": []}')
+    # antenna list is empty, but loader validation is deferred to runtime
+    cfg = SimConfig(
+        noise_injection={
+            "enabled": True,
+            "sefd_file": str(sefd_path),
+            "eta_c": 0.9,
+        },
+        imaging=[ImgConfig(tag="default", imager="wsclean", pixels=64)],
+    )
+    assert cfg.noise_injection.enabled is True
+    assert cfg.noise_injection.sefd_file == str(sefd_path)
+    assert cfg.noise_injection.eta_c == pytest.approx(0.9)
+
+
+def test_noise_injection_rejects_oskar_noise():
+    """Noise injection cannot be combined with OSKAR noise."""
+    with pytest.raises(ValidationError, match="noise_injection.enabled cannot be"):
+        SimConfig(
+            rms=True,
+            noise_injection={"enabled": True, "sefd_file": "data/emerlin_sefd.json"},
+            imaging=[ImgConfig(tag="default", imager="wsclean", pixels=64)],
+        )
+
+
+def test_noise_injection_rejects_noise_rms_start():
+    """Noise injection cannot be combined with OSKAR noise_rms_start."""
+    with pytest.raises(ValidationError, match="noise_injection.enabled cannot be"):
+        SimConfig(
+            noise_rms_start=1e-4,
+            noise_injection={"enabled": True, "sefd_file": "data/emerlin_sefd.json"},
+            imaging=[ImgConfig(tag="default", imager="wsclean", pixels=64)],
+        )
