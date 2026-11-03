@@ -116,10 +116,17 @@ def test_merge_model_data_into_data_adds_model_to_data(monkeypatch, tmp_path):
         def colnames(self):
             return ["DATA", "MODEL_DATA"]
 
-        def getcol(self, name):
-            return {"DATA": data, "MODEL_DATA": model}[name]
+        def nrows(self):
+            return 1
 
-        def putcol(self, name, value):
+        def getcell(self, name, row):
+            return {"DATA": data, "MODEL_DATA": model}[name][row]
+
+        def getcol(self, name, startrow=0, nrow=-1):
+            column = {"DATA": data, "MODEL_DATA": model}[name]
+            return column[startrow : startrow + nrow].copy()
+
+        def putcol(self, name, value, startrow=0, nrow=-1):
             written[name] = value
 
     casacore_module = __import__("types").ModuleType("casacore")

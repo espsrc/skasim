@@ -417,7 +417,11 @@ def test_inject_image_models_runs_continuum_entries_with_wsclean_predict(
 
 
 def test_merge_model_data_into_data(monkeypatch, tmp_path):
-    """MODEL_DATA is accumulated into DATA."""
+    """MODEL_DATA is accumulated into DATA in bounded row chunks."""
+    columns = {
+        "DATA": np.ones((5, 2, 2), dtype=np.complex64),
+        "MODEL_DATA": np.ones((5, 2, 2), dtype=np.complex64) * 0.5,
+    }
     calls = []
 
     class FakeTable:
@@ -433,25 +437,30 @@ def test_merge_model_data_into_data(monkeypatch, tmp_path):
         def colnames(self):
             return ["DATA", "MODEL_DATA"]
 
-        def getcol(self, name):
-            return {
-                "DATA": np.ones((4, 1, 1)),
-                "MODEL_DATA": np.ones((4, 1, 1)) * 0.5,
-            }[name]
+        def nrows(self):
+            return 5
 
-        def putcol(self, name, value):
-            calls.append((name, value))
+        def getcell(self, name, row):
+            return columns[name][row].copy()
+
+        def getcol(self, name, startrow=0, nrow=-1):
+            return columns[name][startrow : startrow + nrow].copy()
+
+        def putcol(self, name, value, startrow=0, nrow=-1):
+            calls.append((name, startrow, nrow))
+            columns[name][startrow : startrow + nrow] = value
 
     # inject fake casacore.tables.table before the function imports it
     fake_tables = ModuleType("casacore.tables")
     fake_tables.table = FakeTable
     monkeypatch.setitem(sys.modules, "casacore.tables", fake_tables)
 
-    merge_model_data_into_data(tmp_path / "visibilities.MS")
+    # one row is 2*2*8 = 32 bytes, so 64 bytes -> chunks of 2 rows
+    merge_model_data_into_data(tmp_path / "visibilities.MS", chunk_bytes=64)
 
-    assert len(calls) == 1
-    assert calls[0][0] == "DATA"
-    assert np.allclose(calls[0][1], 1.5)
+    assert calls == [("DATA", 0, 2), ("DATA", 2, 2), ("DATA", 4, 1)]
+    assert np.allclose(columns["DATA"], 1.5)
+    assert np.allclose(columns["MODEL_DATA"], 0.5)
 
 
 def test_casa_taylor_terms_validate_and_prepare_existing_images(tmp_path, monkeypatch):
@@ -823,10 +832,17 @@ def test_merge_model_data_into_data_adds_model_column(monkeypatch, tmp_path):
         def colnames(self):
             return ["DATA", "MODEL_DATA"]
 
-        def getcol(self, name):
-            return {"DATA": data, "MODEL_DATA": model}[name]
+        def nrows(self):
+            return 1
 
-        def putcol(self, name, value):
+        def getcell(self, name, row):
+            return {"DATA": data, "MODEL_DATA": model}[name][row]
+
+        def getcol(self, name, startrow=0, nrow=-1):
+            column = {"DATA": data, "MODEL_DATA": model}[name]
+            return column[startrow : startrow + nrow].copy()
+
+        def putcol(self, name, value, startrow=0, nrow=-1):
             written[name] = value
 
     casacore_module = ModuleType("casacore")

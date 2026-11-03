@@ -957,8 +957,14 @@ def run_casa_script(
         )
 
 
-def merge_model_data_into_data(visibility_path: Path) -> None:
-    """Add image-model MODEL_DATA into the delivered DATA column."""
+def merge_model_data_into_data(
+    visibility_path: Path, chunk_bytes: int = 512 * 1024**2
+) -> None:
+    """Add image-model MODEL_DATA into the delivered DATA column.
+
+    Rows are processed in chunks of roughly ``chunk_bytes`` per column so
+    peak memory stays bounded for long observations and wide cubes.
+    """
     try:
         table = require_casacore()
     except Exception as exc:
@@ -973,6 +979,13 @@ def merge_model_data_into_data(visibility_path: Path) -> None:
                 f"{visibility_path} must contain DATA and MODEL_DATA columns "
                 "after CASA ft injection."
             )
-        data = ms_table.getcol("DATA")
-        model_data = ms_table.getcol("MODEL_DATA")
-        ms_table.putcol("DATA", data + model_data)
+        n_rows = ms_table.nrows()
+        if n_rows == 0:
+            return
+        row_bytes = max(np.asarray(ms_table.getcell("DATA", 0)).nbytes, 1)
+        chunk_rows = max(1, chunk_bytes // row_bytes)
+        for start in range(0, n_rows, chunk_rows):
+            nrow = min(chunk_rows, n_rows - start)
+            data = ms_table.getcol("DATA", startrow=start, nrow=nrow)
+            data += ms_table.getcol("MODEL_DATA", startrow=start, nrow=nrow)
+            ms_table.putcol("DATA", data, startrow=start, nrow=nrow)
