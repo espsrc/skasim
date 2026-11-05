@@ -11,6 +11,7 @@ from .image_models import (
     has_spectral_cube_model,
     image_model_center,
     image_model_entries,
+    image_model_footprints,
     inject_image_models,
     merge_model_data_into_data,
     prepare_continuum_i_alpha_for_casa,
@@ -26,6 +27,7 @@ from .image_models import (
     validate_spectral_cube,
     validate_static_stokes_maps,
     write_image_model_previews,
+    write_sky_composition_preview,
     write_spectral_cube_input_preview,
 )
 from .wsclean_predict import (
@@ -43,6 +45,7 @@ __all__ = [
     "component_model_entries",
     "has_spectral_cube_model",
     "image_model_entries",
+    "image_model_footprints",
     "image_model_center",
     "primary_model_fits_path",
     "read_fits_image_info",
@@ -51,6 +54,7 @@ __all__ = [
     "validate_spectral_cube",
     "validate_static_stokes_maps",
     "write_image_model_previews",
+    "write_sky_composition_preview",
     "write_spectral_cube_input_preview",
     "inject_image_models",
     "prepare_continuum_i_alpha_for_casa",

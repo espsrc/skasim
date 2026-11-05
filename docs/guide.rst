@@ -131,7 +131,8 @@ Sky Ingestion Models
 --------------------
 
 Version 0.2 introduced a typed ``models`` API. A run can include one
-``component_sky_model`` plus any number of image-model entries.
+``component_sky_model`` plus any number of image-model entries; see
+:ref:`combining-models` for how the components are added together.
 
 Component Models
 ~~~~~~~~~~~~~~~~
@@ -163,8 +164,9 @@ Example (JSON config):
 Image Models
 ~~~~~~~~~~~~
 
-Image-based models are injected via CASA ``ft`` into the ``MODEL_DATA`` column
-and then merged into ``DATA``.
+Image-based models are predicted into the ``MODEL_DATA`` column with
+``wsclean -predict`` (the default) or, for the deprecated backends, CASA
+``ft``. Each entry is added into ``DATA`` straight after its prediction.
 
 **1. Continuum I + Alpha** (``continuum_i_alpha``)
 
@@ -195,9 +197,9 @@ visibilities to ``MODEL_DATA``.
 - ``stokes_i``: Required 2D spatial FITS image in Jy/pixel. It is copied without
   flux scaling into every observation channel.
 - The FITS header must provide valid ``CDELT1`` and ``CDELT2`` pixel scales.
-- The image should be square. Non-square inputs are accepted with a warning, but
-  WSClean predict uses the x dimension for both image dimensions and can distort
-  the model.
+- In pipeline runs the image is placed by its FITS WCS (see
+  :ref:`combining-models`); non-square images and non-square pixels are
+  regridded onto a square WSClean grid.
 - The model frequency reference is the observation channel grid; there is no
   model-level reference-frequency parameter for this spectrally flat type.
 
@@ -216,6 +218,76 @@ Example (JSON config):
    The schema also accepts ``stokes_q``, ``stokes_u`` and ``stokes_v`` paths,
    but this implementation injects **Stokes I only**. Q/U/V planes are not yet
    validated or predicted; do not rely on them for polarized simulations.
+
+.. _combining-models:
+
+Combining Models (Multimodal Runs)
+----------------------------------
+
+A run may combine one ``component_sky_model`` with any number of
+``continuum_i_alpha`` and ``static_stokes_maps`` entries, e.g. a background
+catalogue plus one or more extended targets:
+
+.. code-block:: json
+
+   "models": [
+     {"type": "component_sky_model", "catalog": "MIGHTEE"},
+     {"type": "continuum_i_alpha", "stokes_i": "target_i.fits",
+      "alpha": "target_alpha.fits", "reference_frequency_hz": 1.4e9},
+     {"type": "static_stokes_maps", "stokes_i": "halo_i.fits"}
+   ]
+
+``configs/fits_model/vla_c_catalog_plus_two_images_quick.json`` is a small
+worked example (generate its models with
+``scripts/make_multimodal_demo_models.py`` and check a finished run with
+``scripts/check_multimodal_run.py``).
+
+How the components are added
+   OSKAR simulates the catalogue into ``DATA``. Each image model is then
+   predicted into ``MODEL_DATA`` and added into ``DATA`` before the next one
+   is predicted, because WSClean (and CASA ``ft`` without ``incremental``)
+   overwrite ``MODEL_DATA``. After the run ``DATA`` holds every component and
+   ``MODEL_DATA`` holds only the **last** image model's prediction.
+
+Primary beam
+   OSKAR attenuates catalogue sources with a Gaussian station beam whose field
+   FWHM is the simulation field of view at the band centre, scaling as
+   :math:`\nu_{\rm ref}/\nu`. Visibilities see the power pattern (product of
+   two station beams), whose FWHM is about the field FWHM divided by
+   :math:`\sqrt{2}`. ``skasim`` multiplies every per-channel image-model plane
+   by the same power pattern, centred on the phase centre, so catalogue and
+   image components share one flux scale. Image models are therefore
+   expected to be intrinsic (primary-beam corrected) skies. This also applies
+   to image-only runs.
+
+Placement on the sky
+   WSClean predict ignores a model's ``CRVAL`` and assumes a SIN projection
+   tangent at the phase centre. ``skasim`` places each image at the position
+   given by its own FITS WCS: when the image already matches WSClean's grid to
+   within 0.1 pixel it is passed with ``-shift`` (the world position of its
+   centre pixel); otherwise (other projections, a tangent point away from the
+   phase centre, rotated or mirrored axes, non-square pixels or images) it is
+   regridded with ``reproject_exact`` onto a WSClean-native grid tangent at the
+   phase centre, conserving flux. The record of each entry states which path
+   was taken, the shift, and the flux before and after regridding.
+
+Phase centre
+   The phase centre is ``center`` if given, otherwise the catalogue centre,
+   otherwise the first image model's centre. The deciding rule is recorded,
+   and a warning is raised when an image model reaches beyond the beam
+   half-power radius or the simulation field.
+
+Restrictions
+   The deprecated CASA ``ft`` backends (``casa_taylor_terms`` and
+   ``continuum_i_alpha`` with ``injection_backend: "casa_ft"``) receive
+   neither the shared beam nor WCS placement, so they are only accepted as the
+   sole model entry. ``spectral_cube`` entries cannot be combined with other
+   models, and a run takes at most one ``component_sky_model``.
+
+WSClean predict settings
+   Threads and the WSClean executable for prediction come from the first
+   ``wsclean`` imaging block (or the first imaging block when none uses
+   WSClean); ``wsclean_predict_command`` overrides the executable.
 
 Spectral Reference Policy
 -------------------------

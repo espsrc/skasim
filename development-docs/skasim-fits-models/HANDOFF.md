@@ -8,7 +8,7 @@ Implemented model entry types:
 
 - `component_sky_model`
   - Existing catalog/component path.
-  - May be combined with image-model entries.
+  - May be combined with image-model entries (see "Multimodal runs" below).
 
 - `continuum_i_alpha`
   - Inputs: Stokes-I FITS image, alpha FITS image, `reference_frequency_hz`.
@@ -16,7 +16,8 @@ Implemented model entry types:
   - Implementation creates CASA Taylor-term images in the run directory:
     - `tt0 = I`
     - `tt1 = I * alpha`
-  - CASA `ft` predicts into `MODEL_DATA`.
+  - `wsclean -predict` (default `injection_backend`) predicts per-channel
+    planes into `MODEL_DATA`; CASA `ft` remains as a deprecated backend.
   - `MODEL_DATA` is merged into final `DATA`.
   - FITS preview is shown in the weblog Sky Model section.
 
@@ -28,8 +29,8 @@ Implemented model entry types:
   - The `tt0` term is exported to FITS for the weblog model preview.
 
 - `static_stokes_maps`
-  - Schema exists.
-  - Backend injection is not implemented yet.
+  - Stokes I is injected through `wsclean -predict` (spectrally flat).
+  - Q/U/V paths are accepted by the schema but not injected.
 
 CASA execution:
 
@@ -75,8 +76,18 @@ Known runtime caveat:
 - `catalog` is the canonical user-facing word. Numeric catalog IDs are removed.
 - Typed `models` entries are the canonical configuration shape.
 - Model preparation and injection are separate from catalog loading.
-- CASA `ft` is the v1 default image-model injection backend.
-- `MODEL_DATA` is retained and merged into `DATA`.
+- CASA `ft` was the v1 default image-model injection backend; `wsclean -predict`
+  is now the default and CASA `ft` is deprecated.
+- `MODEL_DATA` is retained and merged into `DATA` after every image entry; it
+  holds only the last entry's prediction at the end of the run.
+
+## Multimodal runs
+
+Combining one catalogue with several image models is specified in
+`.hermes/PRD-multimodal-input.md`: per-entry merge, a shared OSKAR-equivalent
+Gaussian beam applied to image models, WCS placement through WSClean `-shift`
+or `reproject_exact` regridding, CASA `ft` entries accepted only alone, and
+composition reporting in the manifest and weblog.
 - Image-only runs create a base MS and may fall back to a zero-flux placeholder source.
 - Weblog should show model provenance and visual previews where possible.
 

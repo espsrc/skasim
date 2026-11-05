@@ -593,3 +593,264 @@ def _preview_cmap():
     import cmasher as cmr
 
     return cmr.get_sub_cmap("cmr.rainforest", 0.30, 0.85)
+
+
+# --------------------------------------------------------------------------- #
+# combined sky-composition panel (multimodal runs)
+# --------------------------------------------------------------------------- #
+
+# Unordered model entries: ColorBrewer Set2, each with its own line style so the
+# panel survives greyscale printing.
+_COMPOSITION_COLORS = ("#66c2a5", "#fc8d62", "#8da0cb", "#e78ac3", "#a6d854")
+_COMPOSITION_STYLES = ("-", "--", "-.", ":", (0, (5, 1, 1, 1)))
+
+_COMPOSITION_RC = {
+    "font.family": "serif",
+    # cmr10 ships with Matplotlib; it needs mathtext tick labels for the minus.
+    "font.serif": ["cmr10", "CMU Serif", "DejaVu Serif"],
+    "mathtext.fontset": "cm",
+    "axes.formatter.use_mathtext": True,
+    "axes.unicode_minus": True,
+    "font.size": 11,
+    "axes.labelsize": 12,
+    "legend.fontsize": 9.5,
+    "axes.linewidth": 0.8,
+    "xtick.direction": "in",
+    "ytick.direction": "in",
+    "xtick.top": True,
+    "ytick.right": True,
+    "xtick.minor.visible": True,
+    "ytick.minor.visible": True,
+    "xtick.major.size": 6,
+    "ytick.major.size": 6,
+    "xtick.minor.size": 3,
+    "ytick.minor.size": 3,
+    "xtick.major.width": 0.8,
+    "ytick.major.width": 0.8,
+    "xtick.minor.width": 0.6,
+    "ytick.minor.width": 0.6,
+    "legend.frameon": False,
+    "axes.grid": False,
+}
+
+
+_COMPOSITION_TYPE_LABELS = {
+    "continuum_i_alpha": r"CONTINUUM $I,\,\alpha$",
+    "static_stokes_maps": "STOKES MAPS",
+    "casa_taylor_terms": "TAYLOR TERMS",
+}
+
+
+def _footprint_outline(header: fits.Header, center: SkyCoord, n_edge: int = 40):
+    """Return the pixel-edge outline of a FITS image as (east, north) arcmin."""
+    wcs = WCS(header).celestial
+    nx, ny = int(header["NAXIS1"]), int(header["NAXIS2"])
+    t = np.linspace(0.0, 1.0, n_edge)
+    x0, x1, y0, y1 = -0.5, nx - 0.5, -0.5, ny - 0.5
+    xs = np.concatenate(
+        [
+            x0 + (x1 - x0) * t,
+            np.full(n_edge, x1),
+            x1 - (x1 - x0) * t,
+            np.full(n_edge, x0),
+        ]
+    )
+    ys = np.concatenate(
+        [
+            np.full(n_edge, y0),
+            y0 + (y1 - y0) * t,
+            np.full(n_edge, y1),
+            y1 - (y1 - y0) * t,
+        ]
+    )
+    world = wcs.pixel_to_world(xs, ys)
+    east, north = center.spherical_offsets_to(world)
+    return east.to(u.arcmin).value, north.to(u.arcmin).value
+
+
+def write_sky_composition_preview(
+    ctx: RunContext,
+    center: SkyCoord,
+    beam,
+    field_fov_deg: float,
+    catalogue: Optional[tuple] = None,
+    phase_centre_rule: Optional[str] = None,
+) -> Optional[Path]:
+    """Draw one panel with every sky component around the phase centre.
+
+    Catalogue sources (symbol area scaling with flux density), each FITS image
+    model's on-sky footprint, the shared beam's half-power circle at the
+    reference frequency, and the simulation field are drawn in offsets from
+    the phase centre (east to the left). ``catalogue`` is an optional
+    ``(ra_deg, dec_deg, flux_jy)`` tuple of arrays.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Circle
+
+    entries = image_model_entries(ctx.config)
+    if not entries:
+        return None
+
+    half_power_arcmin = beam.power_fwhm_deg(beam.ref_freq_hz) / 2.0 * 60.0
+    field_arcmin = field_fov_deg / 2.0 * 60.0
+    extent = max(field_arcmin, half_power_arcmin)
+
+    with plt.rc_context(_COMPOSITION_RC):
+        fig, ax = plt.subplots(figsize=(5.6, 5.6))
+        handles = []
+
+        if catalogue is not None and len(catalogue[0]) > 0:
+            ra, dec, flux = (np.asarray(a, dtype=float) for a in catalogue)
+            coords = SkyCoord(ra * u.deg, dec * u.deg)
+            east, north = center.spherical_offsets_to(coords)
+            east, north = east.to(u.arcmin).value, north.to(u.arcmin).value
+            inside = (np.abs(east) <= 1.15 * extent) & (np.abs(north) <= 1.15 * extent)
+            finite = np.where(np.isfinite(flux) & (flux > 0), flux, np.nan)
+            peak = np.nanmax(finite) if np.any(np.isfinite(finite)) else 1.0
+            sizes = 6.0 + 60.0 * np.sqrt(np.nan_to_num(finite / peak, nan=0.0))
+            ax.scatter(
+                east[inside],
+                north[inside],
+                s=sizes[inside],
+                facecolor="steelblue",
+                edgecolor="black",
+                linewidth=0.4,
+                zorder=3,
+            )
+            handles.append(
+                Line2D(
+                    [],
+                    [],
+                    linestyle="none",
+                    marker="o",
+                    markerfacecolor="steelblue",
+                    markeredgecolor="black",
+                    markeredgewidth=0.4,
+                    label=f"CATALOGUE ({int(np.count_nonzero(inside))} sources)",
+                )
+            )
+
+        for index, entry in enumerate(entries):
+            path = primary_model_fits_path(entry)
+            if path is None:
+                continue
+            try:
+                header = fits.getheader(path)
+                east, north = _footprint_outline(header, center)
+            except Exception as exc:
+                logger.debug(f"sky composition: cannot outline {path}: {exc}")
+                continue
+            color = _COMPOSITION_COLORS[index % len(_COMPOSITION_COLORS)]
+            style = _COMPOSITION_STYLES[index % len(_COMPOSITION_STYLES)]
+            ax.fill(east, north, color=color, alpha=0.25, linewidth=0, zorder=2)
+            ax.plot(east, north, color=color, linestyle=style, linewidth=1.4, zorder=2)
+            extent = max(
+                extent, float(np.max(np.abs(east))), float(np.max(np.abs(north)))
+            )
+            handles.append(
+                Line2D(
+                    [],
+                    [],
+                    color=color,
+                    linestyle=style,
+                    linewidth=1.4,
+                    label=f"IMAGE {index}: "
+                    + _COMPOSITION_TYPE_LABELS.get(
+                        entry.type, entry.type.replace("_", " ").upper()
+                    ),
+                )
+            )
+
+        ax.add_patch(
+            Circle(
+                (0.0, 0.0),
+                half_power_arcmin,
+                fill=False,
+                color="black",
+                linestyle="--",
+                linewidth=1.0,
+                zorder=1,
+            )
+        )
+        ax.add_patch(
+            Circle(
+                (0.0, 0.0),
+                field_arcmin,
+                fill=False,
+                color="black",
+                linestyle=":",
+                linewidth=1.0,
+                zorder=1,
+            )
+        )
+        ax.plot(0.0, 0.0, marker="+", color="crimson", markersize=11, mew=1.4, zorder=4)
+        handles += [
+            Line2D(
+                [],
+                [],
+                color="black",
+                linestyle="--",
+                linewidth=1.0,
+                label="BEAM HALF POWER",
+            ),
+            Line2D(
+                [],
+                [],
+                color="black",
+                linestyle=":",
+                linewidth=1.0,
+                label="SIMULATION FIELD",
+            ),
+            Line2D(
+                [],
+                [],
+                color="crimson",
+                linestyle="none",
+                marker="+",
+                markersize=9,
+                mew=1.4,
+                label="PHASE CENTRE",
+            ),
+        ]
+
+        lim = 1.12 * extent
+        ax.set_xlim(lim, -lim)  # east to the left
+        ax.set_ylim(-lim, lim)
+        ax.set_aspect("equal")
+        ax.set_xlabel(r"$\Delta\alpha\,\cos\delta$ (arcmin)")
+        ax.set_ylabel(r"$\Delta\delta$ (arcmin)")
+        ax.text(
+            0.03,
+            0.97,
+            f"{beam.ref_freq_hz / 1e6:.1f} MHz",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+        )
+        if phase_centre_rule:
+            ax.text(
+                0.03,
+                0.03,
+                f"phase centre: {phase_centre_rule.replace('_', ' ')}",
+                transform=ax.transAxes,
+                ha="left",
+                va="bottom",
+                fontsize=10,
+            )
+        # The field is full of data, so the legend sits under the axes.
+        ax.legend(
+            handles=handles,
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.13),
+            ncol=2,
+            handlelength=2.2,
+            columnspacing=1.6,
+        )
+        png_name = f"{ctx.work_dir.name}_sky_composition.png"
+        png_path = ctx.work_dir / png_name
+        fig.savefig(png_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    ctx.manifest.add_output("plot", png_name, role="sky_composition")
+    return png_path

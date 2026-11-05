@@ -557,6 +557,21 @@ class SimConfig(BaseModel):
                     "model entries."
                 )
 
+            # CASA ft entries get neither the shared primary beam nor WCS
+            # placement, so they are only valid as the sole model entry.
+            ft_types = [
+                model.type
+                for model in self.models
+                if getattr(model, "injection_backend", None) == "casa_ft"
+            ]
+            if ft_types and len(self.models) > 1:
+                raise ValueError(
+                    "Model entries using the deprecated casa_ft backend "
+                    f"({', '.join(sorted(set(ft_types)))}) cannot be combined with "
+                    "other model entries; use continuum_i_alpha with "
+                    "injection_backend='wsclean_predict' for multimodal runs."
+                )
+
             self.source_flux_jy = []
             self.stokes_q_jy = None
             self.stokes_u_jy = None

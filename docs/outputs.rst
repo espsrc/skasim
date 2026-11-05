@@ -47,6 +47,26 @@ milestone records how an input image model was scaled:
      }
    }
 
+Multimodal runs record, as milestones:
+
+- ``phase_centre_resolved``: the phase centre and the rule that chose it
+  (``explicit``, ``catalogue``, ``image_model``, ``default_field`` or
+  ``generated_sources``).
+- ``primary_beam_configured``: the shared Gaussian beam (field FWHM,
+  reference frequency, power FWHM).
+- ``catalogue_beam_flux``: catalogue Stokes I at the band centre with and
+  without the beam.
+- ``image_model_footprints``: each image model's extent relative to the beam
+  half-power radius and the simulation field.
+- ``image_model_injected`` (one per image model): backend, WCS placement
+  (``-shift`` position, whether the image was regridded, flux before and
+  after), and intrinsic and beam-attenuated flux at the band centre.
+- ``image_model_merged`` (one per image model): ``MODEL_DATA`` added into
+  ``DATA``. These are in-place changes to the Measurement Set, recorded as
+  milestones rather than outputs.
+- ``image_injection_completed``: number of merges and
+  ``model_data_contents: "last_entry_only"``.
+
 The Weblog
 ----------
 
@@ -61,6 +81,10 @@ Key Sections
    - Lists all ingested models.
    - Shows provenance (original file paths).
    - Provides visual previews. For CASA Taylor-term models, the ``tt0`` term is automatically exported to FITS/PNG for display.
+   - For runs with image models, a **Sky composition** table (position,
+     placement, intrinsic and in-beam flux for every component) and a
+     **Combined view** of catalogue sources, image footprints, the beam
+     half-power circle and the simulation field around the phase centre.
      
 2. **Observation Details**:
    - Spectral grid setup.
@@ -89,5 +113,12 @@ Visibility Data (Measurement Set)
 ---------------------------------
 
 The resulting Measurement Set (``.ms``) is located within the output 
-directory. It contains the combined visibilities from all sky models, 
-ready for further processing with standard radio-interferometry tools.
+directory. Its ``DATA`` column contains the combined visibilities from all sky
+models, ready for further processing with standard radio-interferometry tools.
+
+.. note::
+   When image models are injected, ``MODEL_DATA`` is left in the Measurement
+   Set but holds **only the last image model's prediction**, not the full sky
+   model. Image models are added into ``DATA`` one at a time because each
+   prediction overwrites ``MODEL_DATA``. Use ``DATA`` for the simulated sky;
+   any later WSClean or CASA deconvolution rewrites ``MODEL_DATA``.

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from loguru import logger
 
@@ -53,6 +53,7 @@ from .fits_io import (
     component_model_entries,
     image_model_center,
     image_model_entries,
+    image_model_footprints,
     primary_model_fits_path,
     read_fits_cube_info,
     read_fits_image_info,
@@ -63,8 +64,14 @@ from .fits_io import (
 from .previews import (
     run_moment8_for_spectral_cube,
     write_image_model_previews,
+    write_sky_composition_preview,
     write_spectral_cube_input_preview,
 )
+
+if TYPE_CHECKING:
+    from astropy.coordinates import SkyCoord
+
+    from ...primary_beam import GaussianStationBeam
 
 # avoid circular imports: wsclean_predict is imported locally inside
 # inject_image_models when a wsclean_predict backend is selected.
@@ -74,8 +81,17 @@ def inject_image_models(
     ctx: RunContext,
     visibility_path: Path,
     imaging_configs: Optional[List[ImgConfig]] = None,
+    phase_center: Optional["SkyCoord"] = None,
+    beam: Optional["GaussianStationBeam"] = None,
 ) -> None:
-    """Inject configured image models into an existing Measurement Set."""
+    """Inject configured image models into an existing Measurement Set.
+
+    ``beam`` and ``phase_center`` describe the shared Gaussian primary beam the
+    pipeline also applies to catalogue sources; WSClean-predicted entries are
+    attenuated by it. Each entry is merged into ``DATA`` straight after its
+    prediction because both backends overwrite ``MODEL_DATA``.
+    """
+    beam_kwargs = {"phase_center": phase_center, "beam": beam}
     entries = image_model_entries(ctx.config)
     if not entries:
         return
@@ -104,6 +120,7 @@ def inject_image_models(
                 index,
                 visibility_path,
                 img_config,
+                **beam_kwargs,
             )
             _record_injection(
                 ctx,
@@ -128,7 +145,7 @@ def inject_image_models(
                     model_paths=product.model_paths,
                     nterms=product.nterms,
                     reffreq=product.reffreq,
-                    incremental=index > 0,
+                    incremental=False,
                 )
                 backend = "casa_ft"
             else:
@@ -143,6 +160,7 @@ def inject_image_models(
                     visibility_path,
                     img_config,
                     product,
+                    **beam_kwargs,
                 )
                 backend = "wsclean_predict"
                 report = {**report, **report_predict}
@@ -168,7 +186,7 @@ def inject_image_models(
                 model_paths=product.model_paths,
                 nterms=product.nterms,
                 reffreq=product.reffreq,
-                incremental=index > 0,
+                incremental=False,
             )
             _record_injection(
                 ctx,
@@ -212,11 +230,27 @@ def inject_image_models(
         else:
             continue
 
-    merge_model_data_into_data(visibility_path)
+        # Both backends overwrite MODEL_DATA, so each entry is added into DATA
+        # before the next prediction. This is an in-place MS change: record it
+        # as a milestone, not an output.
+        merge_model_data_into_data(visibility_path)
+        ctx.add_milestone(
+            "image_model_merged",
+            "completed",
+            details={"model_entry_index": index, "model_type": entry.type},
+        )
+
     ctx.add_milestone(
         "image_injection_completed",
         "completed",
-        details={"visibility_path": str(visibility_path), "model_data_merged": True},
+        details={
+            "visibility_path": str(visibility_path),
+            "model_data_merged": True,
+            "n_merges": len(entries),
+            # MODEL_DATA is left in place and holds only the final entry's
+            # prediction; DATA holds the sum of every component.
+            "model_data_contents": "last_entry_only",
+        },
     )
 
 
@@ -264,6 +298,7 @@ __all__ = [
     "has_spectral_cube_model",
     "image_model_center",
     "image_model_entries",
+    "image_model_footprints",
     "inject_image_models",
     "merge_model_data_into_data",
     "prepare_casa_taylor_terms",
@@ -284,5 +319,6 @@ __all__ = [
     "validate_spectral_cube",
     "validate_static_stokes_maps",
     "write_image_model_previews",
+    "write_sky_composition_preview",
     "write_spectral_cube_input_preview",
 ]

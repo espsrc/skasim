@@ -92,6 +92,21 @@
     .psf-profile td { padding: 0.3rem 0; border-bottom: 1px solid #eee; font-variant-numeric: tabular-nums; }
     @media (max-width: 700px) { .psf-profile .psf-layout { grid-template-columns: 1fr; } }
 
+    /* sky composition (multimodal runs) */
+    .composition { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 460px); gap: 1.5rem; align-items: start; margin-top: 1.25rem; }
+    @media (max-width: 900px) { .composition { grid-template-columns: 1fr; } }
+    .composition img { width: 100%; height: auto; display: block; }
+    table.composition-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    table.composition-table th { text-align: left; color: var(--muted); font-weight: 500; padding: 0.3rem 0.6rem; border-bottom: 1px solid var(--border); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+    table.composition-table td { padding: 0.35rem 0.6rem; border-bottom: 1px solid #f0f0f0; vertical-align: baseline; }
+    table.composition-table tr:last-child td { border-bottom: none; }
+    table.composition-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    table.composition-table .src { font-family: monospace; font-size: 0.75rem; color: var(--muted); word-break: break-all; }
+    .composition-notes { display: grid; grid-template-columns: max-content 1fr; gap: 0.2rem 1rem; font-size: 0.8rem; margin-top: 0.9rem; }
+    .composition-notes dt { color: var(--muted); text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.05em; padding-top: 0.1rem; }
+    .composition-notes dd { margin: 0; font-variant-numeric: tabular-nums; }
+    .flag { color: var(--danger); font-size: 0.75rem; margin-left: 0.25rem; }
+
     /* timeline */
     table.timeline { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
     table.timeline th { text-align: left; color: var(--muted); font-weight: 500; padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--border); font-size: 0.75rem; text-transform: uppercase; }
@@ -347,6 +362,48 @@
       </div>
       {% endif %}
     </div>
+    {% if sky_composition %}
+    <div class="composition">
+      <div>
+        <div class="section-label">Sky composition</div>
+        <table class="composition-table">
+          <thead>
+            <tr>
+              <th>Component</th><th>Source</th><th class="num">Offset</th><th>Placement</th>
+              <th class="num">Intrinsic ({{ sky_composition.flux_unit }})</th><th class="num">In beam ({{ sky_composition.flux_unit }})</th><th class="num">Beam loss</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for row in sky_composition.rows %}
+            <tr>
+              <td><span class="badge {{ row.color }}">{{ row.component }}</span>{% if row.type %} {{ row.type }}{% endif %}</td>
+              <td class="src">{{ row.source }}</td>
+              <td class="num">{{ row.offset }}</td>
+              <td>{{ row.placement }}</td>
+              <td class="num">{{ row.intrinsic_text }}</td>
+              <td class="num">{{ row.attenuated_text }}</td>
+              <td class="num">{% if row.attenuation_pct is not none %}{{ "%.1f" | format(row.attenuation_pct) }}%{% else %}—{% endif %}{% if row.beyond_half_power %}<span class="flag" title="Footprint extends beyond the beam half-power radius">▲</span>{% endif %}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        <dl class="composition-notes">
+          {% if sky_composition.phase_centre %}<dt>Phase centre</dt><dd>{{ sky_composition.phase_centre }} · {{ sky_composition.phase_centre_rule }}</dd>{% endif %}
+          {% if sky_composition.beam_power_fwhm_arcmin is not none %}<dt>Beam</dt><dd>Gaussian (OSKAR station beam), power FWHM {{ "%.2f" | format(sky_composition.beam_power_fwhm_arcmin) }}′{% if sky_composition.ref_freq_mhz %} at {{ "%.1f" | format(sky_composition.ref_freq_mhz) }} MHz{% endif %}</dd>{% endif %}
+          {% if sky_composition.ref_freq_mhz %}<dt>Fluxes</dt><dd>Stokes I at {{ "%.1f" | format(sky_composition.ref_freq_mhz) }} MHz; images are merged into DATA one at a time{% if sky_composition.n_merges %} ({{ sky_composition.n_merges }} merges){% endif %}</dd>{% endif %}
+          {% if sky_composition.model_data_last_entry_only %}<dt>MODEL_DATA</dt><dd>holds only the last image model's prediction; DATA holds every component</dd>{% endif %}
+        </dl>
+      </div>
+      {% if sky_composition_plot %}
+      <div>
+        <div class="section-label">Combined view</div>
+        <a href="{{ sky_composition_plot.path }}" target="_blank" rel="noopener">
+          <img src="{{ sky_composition_plot.data }}" alt="Combined sky composition around the phase centre">
+        </a>
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
     {% endif %}
 
     <!-- Science Products -->

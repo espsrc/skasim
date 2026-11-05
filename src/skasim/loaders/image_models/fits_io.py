@@ -25,6 +25,7 @@ from ...config import (
     StaticStokesMapsModelEntry,
 )
 from ...image_geometry import MIN_IMAGE_PIXELS
+from ...primary_beam import GaussianStationBeam, angular_separation_deg
 
 # suppress fits formatting fixes
 warnings.simplefilter("ignore", category=FITSFixedWarning)
@@ -79,6 +80,61 @@ def primary_model_fits_path(entry: ModelEntry) -> Path | None:
             if value:
                 return Path(value).expanduser().resolve()
     return None
+
+
+def image_model_footprints(
+    entries: list[ModelEntry],
+    center: SkyCoord,
+    beam: GaussianStationBeam,
+    field_fov_deg: float,
+) -> list[dict]:
+    """Return each FITS image model's footprint relative to the phase centre.
+
+    The footprint radius is the largest angular distance of any pixel-edge
+    corner from the phase centre. It is compared with the shared beam's
+    half-power radius at its reference frequency and with the simulation
+    field radius, so heavily attenuated components can be flagged.
+    """
+    half_power_radius = float(beam.power_fwhm_deg(beam.ref_freq_hz)) / 2.0
+    field_radius = float(field_fov_deg) / 2.0
+    records = []
+    for index, entry in enumerate(entries):
+        path = primary_model_fits_path(entry)
+        if path is None:
+            continue
+        try:
+            header = fits.getheader(path)
+            wcs = WCS(header).celestial
+            nx = int(header["NAXIS1"])
+            ny = int(header["NAXIS2"])
+            xs = np.array([-0.5, nx - 0.5, nx - 0.5, -0.5])
+            ys = np.array([-0.5, -0.5, ny - 0.5, ny - 0.5])
+            ra, dec = wcs.all_pix2world(xs, ys, 0)
+            centre_ra, centre_dec = wcs.all_pix2world((nx - 1) / 2.0, (ny - 1) / 2.0, 0)
+        except Exception as exc:
+            logger.debug(f"image_model_footprints: cannot read {path}: {exc}")
+            continue
+        icrs = center.icrs
+        radius = float(
+            np.max(angular_separation_deg(ra, dec, icrs.ra.deg, icrs.dec.deg))
+        )
+        offset = float(
+            angular_separation_deg(centre_ra, centre_dec, icrs.ra.deg, icrs.dec.deg)
+        )
+        records.append(
+            {
+                "model_entry_index": index,
+                "model_type": entry.type,
+                "source": str(path),
+                "centre_offset_deg": offset,
+                "footprint_radius_deg": radius,
+                "beam_half_power_radius_deg": half_power_radius,
+                "field_radius_deg": field_radius,
+                "beyond_beam_half_power": bool(radius > half_power_radius),
+                "beyond_field": bool(radius > field_radius),
+            }
+        )
+    return records
 
 
 @dataclass(frozen=True)

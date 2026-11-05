@@ -1,0 +1,43 @@
+{
+    "title": "Multimodal demo: catalogue + two image models",
+    "description": "VLA-C composite: component catalogue plus two compact continuum I+alpha image models, one tangent at the phase centre and one 7.2 arcmin away on a TAN grid (regridded). Generate the models with scripts/make_multimodal_demo_models.py and check the result with scripts/check_multimodal_run.py.",
+    "telescope": "VLA",
+    "telescope_version": "C",
+    "models": [
+        {
+            "type": "component_sky_model",
+            "path": "configs/fits_model/quick_component_catalog.json",
+            "sky_format": "json"
+        },
+        {
+            "type": "continuum_i_alpha",
+            "stokes_i": "configs/fits_model/generated/mm_target_a_i.fits",
+            "alpha": "configs/fits_model/generated/mm_target_a_alpha.fits",
+            "reference_frequency_hz": 1455500000.0
+        },
+        {
+            "type": "continuum_i_alpha",
+            "stokes_i": "configs/fits_model/generated/mm_target_b_i.fits",
+            "alpha": "configs/fits_model/generated/mm_target_b_alpha.fits",
+            "reference_frequency_hz": 1455500000.0
+        }
+    ],
+    "center": "15h31m25.36s 35d33m40.2s",
+    "observation": {
+        "frequency_mhz": 1455.5,
+        "bandwidth_mhz": 8.0,
+        "n_channels": 16,
+        "observation_time_s": 600
+    },
+    "uv_coverage": false,
+    "imaging": [
+        {
+            "tag": "dirty",
+            "pixels": 512,
+            "cell_size_arcsec": 3.0,
+            "imager": "oskar-dirty"
+        }
+    ],
+    "output_dir": "demo_output/fits_model_vla_c_catalog_plus_two_images_quick",
+    "overwrite": true
+}

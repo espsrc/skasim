@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
+import pytest
 from astropy.io import fits
 
 from skasim.config import ImgConfig, ObsConfig, SimConfig
@@ -362,12 +363,6 @@ def test_sky_model_summary_typed_models(tmp_path):
                 "alpha": str(alpha_f),
                 "reference_frequency_hz": 1.4e9,
             },
-            {
-                "type": "casa_taylor_terms",
-                "tt0": str(tt0),
-                "tt1": str(tt1),
-                "reference_frequency_hz": 1.5e9,
-            },
         ]
     )
     manifest = RunManifest(
@@ -377,13 +372,32 @@ def test_sky_model_summary_typed_models(tmp_path):
     )
     summary = _sky_model_summary(manifest)
 
-    assert len(summary) == 3
+    assert len(summary) == 2
     assert summary[0]["label"] == "Catalog"
     assert summary[0]["source"] == "MIGHTEE"
     assert summary[1]["label"] == "Continuum I+α"
     assert str(stokes_i) in summary[1]["source"]
-    assert summary[2]["label"] == "Taylor terms (nterms=2)"
-    assert summary[2]["nterms"] == 2
+
+    # CASA ft entries are only valid on their own (multimodal runs reject them).
+    taylor_config = SimConfig(
+        models=[
+            {
+                "type": "casa_taylor_terms",
+                "tt0": str(tt0),
+                "tt1": str(tt1),
+                "reference_frequency_hz": 1.5e9,
+            },
+        ]
+    )
+    taylor_summary = _sky_model_summary(
+        RunManifest(
+            run_id="test-taylor",
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            config=taylor_config,
+        )
+    )
+    assert taylor_summary[0]["label"] == "Taylor terms (nterms=2)"
+    assert taylor_summary[0]["nterms"] == 2
 
 
 def test_sky_model_summary_legacy_catalog():
@@ -412,9 +426,12 @@ def test_sky_model_summary_weblog_renders_typed_labels(tmp_path):
     tt0_path = tmp_path / "tt0"
     tt0_path.touch()
 
-    config = SimConfig(
+    catalog_config = SimConfig(
+        models=[{"type": "component_sky_model", "catalog": "MIGHTEE"}]
+    )
+    # CASA ft entries are only valid on their own (multimodal runs reject them).
+    taylor_config = SimConfig(
         models=[
-            {"type": "component_sky_model", "catalog": "MIGHTEE"},
             {
                 "type": "casa_taylor_terms",
                 "tt0": str(tt0_path),
@@ -422,16 +439,18 @@ def test_sky_model_summary_weblog_renders_typed_labels(tmp_path):
             },
         ]
     )
-    manifest = RunManifest(
-        run_id="typed-labels",
-        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        config=config,
-    )
 
-    html = render_weblog(manifest, tmp_path)
+    htmls = []
+    for run_id, config in (("catalog", catalog_config), ("taylor", taylor_config)):
+        manifest = RunManifest(
+            run_id=run_id,
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            config=config,
+        )
+        htmls.append(render_weblog(manifest, tmp_path))
 
-    assert "Catalog" in html
-    assert "Taylor terms" in html
+    assert "Catalog" in htmls[0]
+    assert "Taylor terms" in htmls[1]
 
 
 def test_phase_centre_warning_flags_drift_beyond_tolerance(tmp_path):
@@ -570,3 +589,122 @@ def test_summary_card_reports_status_class_imagers_and_no_issues(tmp_path):
     assert 'class="badge success"' in html
     assert "WSClean" in html
     assert "No issues" in html
+
+
+# ---------------------------------------------------------------------------
+# multimodal input: sky composition table
+# ---------------------------------------------------------------------------
+
+
+def _composition_manifest():
+    manifest = RunManifest(
+        run_id="composition",
+        started_at=datetime(2026, 11, 3, tzinfo=timezone.utc),
+        config=SimConfig(),
+    )
+    manifest.add_milestone(
+        "phase_centre_resolved",
+        "completed",
+        details={"rule": "catalogue", "ra_deg": 150.0, "dec_deg": 2.0},
+    )
+    manifest.add_milestone(
+        "primary_beam_configured",
+        "completed",
+        details={
+            "power_fwhm_deg_at_ref": 0.35,
+            "ref_freq_hz": 1.4e9,
+            "field_fwhm_deg": 0.5,
+        },
+    )
+    manifest.add_milestone(
+        "catalogue_beam_flux",
+        "completed",
+        details={
+            "n_sources": 12,
+            "intrinsic_flux_jy_at_ref": 0.0125,
+            "attenuated_flux_jy_at_ref": 0.01,
+            "max_offset_deg": 0.2,
+        },
+    )
+    manifest.add_milestone(
+        "image_model_footprints",
+        "completed",
+        details={
+            "entries": [
+                {
+                    "model_entry_index": 0,
+                    "source": "/data/target.fits",
+                    "centre_offset_deg": 0.1,
+                    "beyond_beam_half_power": True,
+                }
+            ]
+        },
+    )
+    manifest.add_milestone(
+        "image_model_injected",
+        "completed",
+        details={
+            "model_entry_index": 0,
+            "model_type": "continuum_i_alpha",
+            "backend": "wsclean_predict",
+            "wcs_placement": "fits_wcs",
+            "resampled": True,
+            "shift_applied": True,
+            "offset_arcsec": 360.0,
+            "intrinsic_flux_jy_at_ref": 0.004,
+            "attenuated_flux_jy_at_ref": 0.002,
+        },
+    )
+    manifest.add_milestone(
+        "image_injection_completed",
+        "completed",
+        details={"n_merges": 1, "model_data_contents": "last_entry_only"},
+    )
+    return manifest
+
+
+def test_sky_composition_rows_share_one_flux_unit():
+    from skasim.weblog import _sky_composition
+
+    composition = _sky_composition(_composition_manifest())
+
+    assert composition["flux_unit"] == "mJy"
+    catalogue, image = composition["rows"]
+    assert catalogue["component"] == "Catalogue"
+    assert catalogue["intrinsic_text"] == "12.50"
+    assert catalogue["attenuation_pct"] == pytest.approx(20.0)
+    assert image["component"] == "Image 0"
+    assert image["source"] == "target.fits"
+    assert image["placement"] == "regridded + shift"
+    assert image["offset"] == "6.00′"
+    assert image["attenuated_text"] == "2.00"
+    assert image["beyond_half_power"] is True
+    assert composition["phase_centre_rule"] == "catalogue centre"
+    assert composition["beam_power_fwhm_arcmin"] == pytest.approx(21.0)
+    assert composition["model_data_last_entry_only"] is True
+
+
+def test_sky_composition_absent_without_image_models():
+    from skasim.weblog import _sky_composition
+
+    manifest = RunManifest(
+        run_id="catalogue-only",
+        started_at=datetime(2026, 11, 3, tzinfo=timezone.utc),
+        config=SimConfig(),
+    )
+
+    assert _sky_composition(manifest) is None
+
+
+def test_weblog_renders_sky_composition_section(tmp_path):
+    manifest = _composition_manifest()
+    manifest.config = SimConfig(
+        models=[{"type": "component_sky_model", "catalog": "GLEAM"}]
+    )
+
+    html = render_weblog(manifest, tmp_path)
+
+    assert "Sky composition" in html
+    assert "regridded + shift" in html
+    assert "Intrinsic (mJy)" in html
+    assert "holds only the last image model" in html

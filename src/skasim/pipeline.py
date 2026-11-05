@@ -25,10 +25,13 @@ from .loaders import (
     component_model_entries,
     image_model_center,
     image_model_entries,
+    image_model_footprints,
     inject_image_models,
     write_image_model_previews,
+    write_sky_composition_preview,
 )
 from .manifest import RunContext, create_run_context
+from .primary_beam import GaussianStationBeam, angular_separation_deg, simulation_beam
 from .runtime import require_karabo_module
 from .sky import SkyModel, Source
 from .utils import build_shadems_uv_coverage_argv, get_diameter, run_shadems_command
@@ -237,6 +240,150 @@ def _effective_img_config(
             "cell_size_arcsec": geometry.effective_cell_size_arcsec,
         }
     )
+
+
+def phase_centre_rule(config: SimConfig) -> str:
+    """Name the rule that decides the phase centre for this run.
+
+    Precedence: explicit ``center`` → catalogue (typed component entry or a
+    legacy sky file / catalog / FITS catalogue) → first image model with a
+    usable WCS → default field (image models without WCS centre) → generated
+    sources.
+    """
+    if config.center is not None:
+        return "explicit"
+    if component_model_entries(config) or any(
+        source is not None
+        for source in (config.sky_file, config.catalog, config.fits_image)
+    ):
+        return "catalogue"
+    image_entries = image_model_entries(config)
+    if image_entries:
+        if image_model_center(image_entries) is not None:
+            return "image_model"
+        return "default_field"
+    return "generated_sources"
+
+
+def catalogue_source_table(sky_model) -> Optional[Tuple[np.ndarray, ...]]:
+    """Return ``(ra_deg, dec_deg, stokes_i_jy, ref_freq_hz, spectral_index)``.
+
+    Columns follow the Karabo/OSKAR source array (``ra, dec, I, Q, U, V,
+    ref_freq, spectral_index, ...``); missing spectral columns are zero.
+    Returns ``None`` when the model has no readable source array.
+    """
+    sources = getattr(sky_model, "sources", None)
+    if sources is None:
+        return None
+    try:
+        arr = np.asarray(getattr(sources, "values", sources), dtype=float)
+    except Exception:
+        return None
+    if arr.ndim != 2 or arr.shape[0] == 0 or arr.shape[1] < 3:
+        return None
+    zeros = np.zeros(arr.shape[0])
+    ref = arr[:, 6] if arr.shape[1] > 6 else zeros
+    alpha = arr[:, 7] if arr.shape[1] > 7 else zeros
+    return arr[:, 0], arr[:, 1], arr[:, 2], ref, alpha
+
+
+def catalogue_beam_flux(
+    table: Tuple[np.ndarray, ...], center: SkyCoord, beam: GaussianStationBeam
+) -> dict:
+    """Total catalogue Stokes I at the beam reference frequency, with and without beam.
+
+    Sources with a positive reference frequency are scaled with their spectral
+    index, ``I (nu0 / nu_ref)^alpha``; others are taken as flat.
+    """
+    ra, dec, flux, ref, alpha = table
+    nu0 = beam.ref_freq_hz
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scale = np.where(ref > 0, (nu0 / np.where(ref > 0, ref, 1.0)) ** alpha, 1.0)
+    flux_nu0 = np.where(np.isfinite(flux * scale), flux * scale, 0.0)
+    icrs = center.icrs
+    sep = angular_separation_deg(ra, dec, icrs.ra.deg, icrs.dec.deg)
+    attenuated = flux_nu0 * beam.power_response(sep, nu0)
+    return {
+        "n_sources": int(flux.size),
+        "intrinsic_flux_jy_at_ref": float(np.sum(flux_nu0)),
+        "attenuated_flux_jy_at_ref": float(np.sum(attenuated)),
+        "max_offset_deg": float(np.nanmax(sep)) if sep.size else 0.0,
+        "beam_ref_freq_hz": nu0,
+    }
+
+
+def _record_sky_layout(
+    ctx: RunContext,
+    center: SkyCoord,
+    fov_sim: u.Quantity,
+    freq: u.Quantity,
+    sky_model=None,
+) -> None:
+    """Record the phase-centre rule, catalogue flux, and image-model footprints.
+
+    Also draws the combined sky-composition panel for runs with image models.
+    """
+    config = ctx.config
+    beam = run_beam(fov_sim, freq)
+    # Image-only runs carry an empty sky model, so there is no source table.
+    table = catalogue_source_table(sky_model) if sky_model is not None else None
+    if table is not None:
+        ctx.add_milestone(
+            "catalogue_beam_flux",
+            "completed",
+            details=catalogue_beam_flux(table, center, beam),
+        )
+    rule = phase_centre_rule(config)
+    ctx.add_milestone(
+        "phase_centre_resolved",
+        "completed",
+        details={
+            "rule": rule,
+            "ra_deg": float(center.icrs.ra.deg),
+            "dec_deg": float(center.icrs.dec.deg),
+        },
+    )
+    logger.info(f"Phase centre rule: {rule}")
+
+    entries = image_model_entries(config)
+    if not entries:
+        return
+    footprints = image_model_footprints(entries, center, beam, fov_sim.to(u.deg).value)
+    for record in footprints:
+        if record["beyond_beam_half_power"] or record["beyond_field"]:
+            logger.warning(
+                "Image model {} ({}) reaches {:.4g} deg from the phase centre, "
+                "beyond the {} ({:.4g} deg); its outer parts are attenuated by "
+                "more than 50%.",
+                record["model_entry_index"],
+                record["model_type"],
+                record["footprint_radius_deg"],
+                "simulation field radius"
+                if record["beyond_field"]
+                else "beam half-power radius",
+                record["field_radius_deg"]
+                if record["beyond_field"]
+                else record["beam_half_power_radius_deg"],
+            )
+    ctx.add_milestone(
+        "image_model_footprints",
+        "completed",
+        details={"entries": footprints},
+    )
+    try:
+        write_sky_composition_preview(
+            ctx,
+            center,
+            beam,
+            fov_sim.to(u.deg).value,
+            catalogue=table[:3] if table is not None else None,
+            phase_centre_rule=rule,
+        )
+    except Exception as exc:
+        logger.warning(f"Sky composition panel failed: {exc}")
+        ctx.add_milestone(
+            "sky_composition_preview_failed", "failed", details={"error": str(exc)}
+        )
 
 
 def parse_center(center_str: Optional[str], fallback: SkyCoord) -> SkyCoord:
@@ -631,6 +778,15 @@ def source_ref_get_best_observation_time(center: SkyCoord, telescope):
 # --------------------------------------------------------------------------- #
 
 
+def run_beam(fov_sim: u.Quantity, freq: u.Quantity) -> GaussianStationBeam:
+    """Return the Gaussian beam OSKAR applies to the catalogue for this run.
+
+    The same beam is applied to every image model before WSClean prediction so
+    all sky components share one attenuation (see ``skasim.primary_beam``).
+    """
+    return simulation_beam(fov_sim.to(u.deg).value, freq.to(u.Hz).value)
+
+
 def run_simulation(
     ctx: RunContext,
     telescope,
@@ -656,11 +812,10 @@ def run_simulation(
     freq = config.observation.frequency_mhz * u.MHz
     delta_freq = config.observation.channel_width_mhz * u.MHz
 
+    beam = run_beam(fov_sim, freq)
     params = {
         "channel_bandwidth_hz": delta_freq.to(u.Hz).value,
-        "station_type": "Gaussian beam",
-        "gauss_beam_fwhm_deg": fov_sim.to(u.deg).value,
-        "gauss_ref_freq_hz": freq.to(u.Hz).value,
+        **beam.oskar_params(),
         "use_gpus": False,
     }
     if config.rms or (config.noise_rms_start is not None):
@@ -804,7 +959,17 @@ def _run_simulation_phase(
                 )
             else:
                 raise
-        inject_image_models(ctx, visibility_path, imaging_configs=imaging_configs)
+        beam = run_beam(fov_sim, config.observation.frequency_mhz * u.MHz)
+        ctx.add_milestone(
+            "primary_beam_configured", "completed", details=beam.as_dict()
+        )
+        inject_image_models(
+            ctx,
+            visibility_path,
+            imaging_configs=imaging_configs,
+            phase_center=center,
+            beam=beam,
+        )
         ctx.add_milestone(
             "simulation_completed", "completed", elapsed_s=time.time() - t_phase_a
         )
@@ -937,6 +1102,7 @@ def run(config: SimConfig) -> None:
         sky_model, sky_center = build_sky_model(ctx, simulation_fov)
         center = parse_center(config.center, sky_center)
         logger.info(f"Centre    : {center.to_string('hmsdms')}")
+        _record_sky_layout(ctx, center, simulation_fov, freq, sky_model=sky_model)
         try:
             from .imaging import write_sky_model_previews
 

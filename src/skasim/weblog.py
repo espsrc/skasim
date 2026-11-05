@@ -674,7 +674,34 @@ def _report_warnings(manifest: RunManifest) -> list[str]:
         for w in block.get("warnings") or []:
             warnings.append(f"Geometry [{tag}]: {w}")
 
+    warnings.extend(_footprint_warnings(manifest))
+
     return warnings
+
+
+def _footprint_warnings(manifest: RunManifest) -> list[str]:
+    """Flag image models reaching beyond the beam half-power or field radius."""
+    footprints = _find_milestone_details(manifest, "image_model_footprints")
+    messages = []
+    for record in footprints.get("entries") or []:
+        if record.get("beyond_field"):
+            limit = "simulation field radius"
+            limit_deg = record.get("field_radius_deg")
+            effect = "its outer parts are strongly attenuated"
+        elif record.get("beyond_beam_half_power"):
+            limit = "beam half-power radius"
+            limit_deg = record.get("beam_half_power_radius_deg")
+            effect = "its outer parts are attenuated by more than 50%"
+        else:
+            continue
+        messages.append(
+            f"Image model {record.get('model_entry_index')} "
+            f"({record.get('model_type')}) reaches "
+            f"{record.get('footprint_radius_deg', float('nan')) * 60:.2f}' from the "
+            f"phase centre, beyond the {limit} "
+            f"({(limit_deg or float('nan')) * 60:.2f}'); {effect}."
+        )
+    return messages
 
 
 def _milestone_detail_text(ms) -> str:
@@ -934,6 +961,160 @@ def _infer_image_caption(filename: str) -> str:
     if "telescope" in lower:
         return "Telescope layout"
     return fname  # fallback to filename
+
+
+_PHASE_CENTRE_RULE_LABELS = {
+    "explicit": "explicit center",
+    "catalogue": "catalogue centre",
+    "image_model": "first image model",
+    "default_field": "default field",
+    "generated_sources": "generated sources",
+}
+
+_COMPONENT_TYPE_LABELS = {
+    "continuum_i_alpha": "Continuum I+α",
+    "static_stokes_maps": "Static Stokes maps",
+    "casa_taylor_terms": "Taylor terms",
+    "spectral_cube": "Spectral cube",
+}
+
+
+def _attenuation_percent(intrinsic, attenuated) -> Optional[float]:
+    if intrinsic in (None, 0) or attenuated is None:
+        return None
+    return 100.0 * (1.0 - float(attenuated) / float(intrinsic))
+
+
+def _flux_display_unit(values) -> tuple:
+    """Pick one unit and decimal count so a flux column reads consistently.
+
+    Returns ``(unit, scale, decimals)`` with four significant digits for the
+    largest value.
+    """
+    finite = [abs(float(v)) for v in values if v is not None and np.isfinite(v)]
+    peak = max(finite) if finite else 0.0
+    for unit, scale in (("Jy", 1.0), ("mJy", 1e3), ("µJy", 1e6)):
+        if peak * scale >= 1.0 or unit == "µJy":
+            break
+    scaled_peak = peak * scale
+    magnitude = int(np.floor(np.log10(scaled_peak))) if scaled_peak > 0 else 0
+    return unit, scale, max(0, 3 - magnitude)
+
+
+def _sky_composition(manifest: RunManifest) -> Optional[dict]:
+    """Per-component positions and fluxes for combined (multimodal) runs.
+
+    Returns ``None`` unless the run injected at least one image model. The
+    catalogue row and every image row use the same beam, so the attenuated
+    fluxes are directly comparable.
+    """
+    injected = [
+        m.details or {} for m in manifest.milestones if m.name == "image_model_injected"
+    ]
+    if not injected:
+        return None
+
+    footprints = {
+        rec.get("model_entry_index"): rec
+        for rec in _find_milestone_details(manifest, "image_model_footprints").get(
+            "entries"
+        )
+        or []
+    }
+    rows = []
+    catalogue = _find_milestone_details(manifest, "catalogue_beam_flux")
+    if catalogue:
+        rows.append(
+            {
+                "component": "Catalogue",
+                "color": "catalog",
+                "source": f"{catalogue.get('n_sources')} sources",
+                "offset": (
+                    f"≤ {catalogue['max_offset_deg'] * 60:.2f}′"
+                    if catalogue.get("max_offset_deg") is not None
+                    else "—"
+                ),
+                "placement": "OSKAR",
+                "intrinsic_jy": catalogue.get("intrinsic_flux_jy_at_ref"),
+                "attenuated_jy": catalogue.get("attenuated_flux_jy_at_ref"),
+            }
+        )
+    for details in injected:
+        index = details.get("model_entry_index")
+        footprint = footprints.get(index, {})
+        model_type = details.get("model_type", "")
+        if details.get("resampled"):
+            placement = "regridded + shift"
+        elif details.get("shift_applied"):
+            placement = "shift"
+        elif details.get("wcs_placement") == "fits_wcs":
+            placement = "centred"
+        elif details.get("backend") == "casa_ft":
+            placement = "CASA ft"
+        else:
+            placement = "phase centre assumed"
+        offset = details.get("offset_arcsec")
+        if offset is None and footprint.get("centre_offset_deg") is not None:
+            offset = footprint["centre_offset_deg"] * 3600.0
+        source = footprint.get("source") or details.get("prefix") or ""
+        rows.append(
+            {
+                "component": f"Image {index}",
+                "color": "continuum",
+                "type": _COMPONENT_TYPE_LABELS.get(model_type, model_type),
+                "source": Path(str(source)).name if source else "",
+                "offset": f"{offset / 60.0:.2f}′" if offset is not None else "—",
+                "placement": placement,
+                "intrinsic_jy": details.get("intrinsic_flux_jy_at_ref"),
+                "attenuated_jy": details.get("attenuated_flux_jy_at_ref"),
+                "beyond_half_power": footprint.get("beyond_beam_half_power"),
+            }
+        )
+    for row in rows:
+        row["attenuation_pct"] = _attenuation_percent(
+            row.get("intrinsic_jy"), row.get("attenuated_jy")
+        )
+    flux_unit, flux_scale, flux_decimals = _flux_display_unit(
+        [row.get("intrinsic_jy") for row in rows]
+        + [row.get("attenuated_jy") for row in rows]
+    )
+    for row in rows:
+        for key in ("intrinsic", "attenuated"):
+            value = row.get(f"{key}_jy")
+            row[f"{key}_text"] = (
+                f"{value * flux_scale:.{flux_decimals}f}" if value is not None else "—"
+            )
+
+    rule = _find_milestone_details(manifest, "phase_centre_resolved")
+    beam = _find_milestone_details(manifest, "primary_beam_configured")
+    completed = _find_milestone_details(manifest, "image_injection_completed")
+    ref_hz = beam.get("ref_freq_hz") or next(
+        (d.get("beam_ref_freq_hz") for d in injected if d.get("beam_ref_freq_hz")),
+        None,
+    )
+    return {
+        "rows": rows,
+        "flux_unit": flux_unit,
+        "phase_centre_rule": _PHASE_CENTRE_RULE_LABELS.get(
+            rule.get("rule"), rule.get("rule")
+        ),
+        "phase_centre": (
+            SkyCoord(rule["ra_deg"] * u.deg, rule["dec_deg"] * u.deg).to_string(
+                "hmsdms", precision=2
+            )
+            if rule.get("ra_deg") is not None
+            else None
+        ),
+        "beam_power_fwhm_arcmin": (
+            beam["power_fwhm_deg_at_ref"] * 60.0
+            if beam.get("power_fwhm_deg_at_ref") is not None
+            else None
+        ),
+        "ref_freq_mhz": ref_hz / 1e6 if ref_hz else None,
+        "model_data_last_entry_only": completed.get("model_data_contents")
+        == "last_entry_only",
+        "n_merges": completed.get("n_merges"),
+    }
 
 
 def _sky_model_summary(manifest: RunManifest) -> list[dict]:
@@ -1275,6 +1456,18 @@ def render_weblog(manifest: RunManifest, work_dir: Path) -> str:
         )
 
     sky_model_summary = _sky_model_summary(manifest)
+    sky_composition = _sky_composition(manifest)
+    sky_composition_plot = None
+    for o in manifest.outputs:
+        if getattr(o, "role", None) != "sky_composition":
+            continue
+        fpath = work_dir / o.path
+        if fpath.exists():
+            sky_composition_plot = {
+                "path": o.path,
+                "data": _file_to_base64_data_uri(fpath),
+            }
+        break
     science_products = _find_science_products(manifest, work_dir)
     imaging_tabs = _build_imaging_tabs(
         manifest,
@@ -1300,6 +1493,8 @@ def render_weblog(manifest: RunManifest, work_dir: Path) -> str:
         sky_model_fov_plot=sky_model_fov_plot,
         input_cube_moment8_plot=input_cube_moment8_plot,
         sky_model_summary=sky_model_summary,
+        sky_composition=sky_composition,
+        sky_composition_plot=sky_composition_plot,
         fits_model_plots=fits_model_plots,
         observation_summary=_observation_summary(manifest),
         noise_summary=_noise_summary(manifest),
