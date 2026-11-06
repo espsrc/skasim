@@ -1,0 +1,115 @@
+name: Docker image
+
+# Publishes ghcr.io/<owner>/skasim:<version> (and :latest) for skasim releases.
+#
+# - Pushing a release tag (vX.Y.Z) builds that tag with its own docker/ recipe.
+# - "Run workflow" builds an existing tag with the recipe of the branch the
+#   workflow is run from; use it for tags that predate the Docker files
+#   (e.g. v0.5.0) or to rebuild a release.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "skasim release tag to build (e.g. v0.5.0)"
+        required: true
+      latest:
+        description: "Also move the :latest tag"
+        type: boolean
+        default: true
+      push:
+        description: "Push to GHCR (untick for a build-and-test dry run)"
+        type: boolean
+        default: true
+      pytest_addopts:
+        description: "Extra pytest options for the smoke test (e.g. --deselect of known defects in an old tag)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.event.inputs.ref || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/skasim
+
+jobs:
+  build-test-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Resolve release tag
+        id: meta
+        env:
+          INPUT_REF: ${{ github.event.inputs.ref }}
+        run: |
+          tag="${INPUT_REF:-$GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$tag' is not a release tag of the form vX.Y.Z"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the Docker recipe
+        uses: actions/checkout@v4
+
+      - name: Check out the skasim source to build
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.meta.outputs.tag }}
+          path: skasim-src
+
+      # Plain `docker build` (BuildKit) keeps a single copy of the ~8 GB image
+      # in the runner's Docker store; a layer cache would not fit GHA limits.
+      - name: Build image
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            -f docker/Dockerfile \
+            --build-context skasim-src=skasim-src \
+            --build-arg SKASIM_VERSION="$VERSION" \
+            -t skasim:smoke \
+            .
+          docker image ls skasim:smoke
+          df -h /
+
+      - name: Smoke test
+        env:
+          PYTEST_ADDOPTS: ${{ github.event.inputs.pytest_addopts }}
+        run: bash docker/smoke-test.sh skasim:smoke skasim-src
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' || github.event.inputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        if: github.event_name == 'push' || github.event.inputs.push == 'true'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          LATEST: ${{ github.event_name == 'push' || github.event.inputs.latest == 'true' }}
+        run: |
+          docker tag skasim:smoke "$IMAGE:$VERSION"
+          docker push "$IMAGE:$VERSION"
+          if [ "$LATEST" = "true" ]; then
+            docker tag skasim:smoke "$IMAGE:latest"
+            docker push "$IMAGE:latest"
+          fi

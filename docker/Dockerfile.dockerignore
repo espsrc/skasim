@@ -1,0 +1,10 @@
+# Only the files the image needs; everything else (data/, models/, configs/,
+# run products, .git) stays out of the build context.
+*
+!docker/
+!src/
+!pyproject.toml
+!README.md
+!LICENSE
+**/__pycache__
+**/*.egg-info

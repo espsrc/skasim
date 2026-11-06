@@ -1,14 +1,20 @@
 name: skasim
+# Mirrors the validated cluster runtime (Karabo 0.36, RASCIL-free, Python 3.12).
+# docker/update-lock.sh resolves this file into the pinned lockfiles used by
+# the container image; regenerate them after changing anything here.
 channels:
-    - nvidia/label/cuda-11.7.0
+    - i4ds/label/dev # oskar / oskarpy 2.12.2
     - i4ds
     - conda-forge
 dependencies:
-    - python=3.10
+    - python=3.12
     - pip
     - setuptools<81
-    - karabo-pipeline
-    - cuda-version=11.7
+    - karabo-pipeline==0.36.0
+    - oskar==2.12.2
+    - oskarpy==2.12.2
+    - cuda-version=12.9
+    - numpy=2.2
     - pip:
           - shadems>=0.5.4
           - -e .
