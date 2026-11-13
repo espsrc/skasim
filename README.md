@@ -30,6 +30,30 @@ Sky Model ──> OSKAR simulation ──> visibilities.MS ──> Image (OSKAR 
 
 ## Quick Start
 
+### With Docker (complete runtime, nothing to install)
+
+```bash
+docker pull ghcr.io/espsrc/skasim:latest
+
+# Run in the current directory; outputs are written here and owned by you
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" \
+  ghcr.io/espsrc/skasim:latest \
+  --output-dir smoke_wsclean \
+  --telescope MeerKAT \
+  --observation-time 60 \
+  --frequency-mhz 1300 \
+  --bandwidth-mhz 25 \
+  --n-channels 2 \
+  --pixels 512 \
+  --flux-density 1.0 \
+  --imager wsclean \
+  --clean-iterations 100
+```
+
+The image bundles Karabo, OSKAR, WSClean, CASA and shadeMS (`linux/amd64`, CPU-validated; GPU untested). On HPC clusters use Apptainer: `apptainer pull docker://ghcr.io/espsrc/skasim:latest`. See [Container image](docs/installation.rst) for details.
+
+### From source
+
 ```bash
 # Clone the repository
 git clone https://github.com/espsrc/skasim.git
@@ -68,7 +92,7 @@ Realistic science demonstrations are collected in the public **science-case gall
 - **WSClean** (optional) — for cleaned imaging
 - **python-casacore** / **CASA** (required by the relevant image-model paths) — for image preparation and measurement-set updates
 
-Karabo 0.36 drops the RASCIL dependency; see Karabo's [migration guide](https://i4ds.github.io/Karabo-Pipeline/migration_rascil.html). This does not change skasim's runtime compatibility baseline: the cluster runtime remains verified on Python 3.9, while the package metadata targets Python 3.10–3.12.
+Karabo 0.36 drops the RASCIL dependency; see Karabo's [migration guide](https://i4ds.github.io/Karabo-Pipeline/migration_rascil.html). This is what allowed the validated cluster runtime to move to Python 3.12 (Karabo 0.36, CUDA 12); the package metadata targets Python 3.10–3.12.
 
 ---
 

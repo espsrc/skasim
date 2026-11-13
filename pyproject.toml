@@ -10,8 +10,8 @@ readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = [
     "pydantic>=2.0",
-    "numpy<2.0",
-    "astropy<6.0",
+    "numpy>=2.2",
+    "astropy>=8.0",
     "aplpy>=2.1",
     "cmasher>=1.8",
     "jinja2>=3.0",
@@ -37,11 +37,9 @@ dev = [
 
 
 [tool.ruff]
-# The real runtime floor is Python 3.9 (see tests/, run on 3.9 clusters),
-# even though `requires-python` above targets 3.10+ for local development.
-# Pinning this stops Ruff from ever suggesting/auto-fixing 3.10-only syntax
-# (e.g. `X | None` PEP 604 unions), which pydantic cannot evaluate on 3.9.
-target-version = "py39"
+# Match the `requires-python` floor. The validated cluster runtime is Python
+# 3.12 (Karabo 0.36, RASCIL-free); the Python 3.9 floor no longer applies.
+target-version = "py310"
 
 [tool.ruff.lint]
 # `extend-select` was found to pull in Ruff's full modern default rule set
@@ -57,3 +55,7 @@ select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# Non-editable installs (wheels, the container image) need the weblog templates.
+skasim = ["templates/*.j2"]
