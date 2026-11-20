@@ -439,7 +439,10 @@ def stack_channels(channel_paths: list[Path], output_path: Path) -> None:
         cunit3 = (header.get("CUNIT3") or "").strip().lower()
         if crval3 is None or cdelt3 is None:
             raise ValueError(f"{path}: missing CRVAL3/CDELT3")
-        freq_hz = crval3 + (ch - crpix3) * cdelt3
+        # Each WSClean channel image carries its own one-pixel FREQ axis: the
+        # channel centre is the world value at pixel 1 (CRVAL3 when CRPIX3 is
+        # 1) and CDELT3 is that channel's width, not a cube-wide spacing.
+        freq_hz = crval3 + (1.0 - crpix3) * cdelt3
         if cunit3 == "mhz":
             freq_hz *= 1e6
         channels.append((float(freq_hz), ch, data, header))
@@ -467,7 +470,20 @@ def stack_channels(channel_paths: list[Path], output_path: Path) -> None:
     out_header["NAXIS2"] = channels[0][3].get("NAXIS2")
     out_header["NAXIS3"] = len(channels)
     freqs = np.array([c[0] for c in channels])
-    df = freqs[1] - freqs[0] if len(freqs) > 1 else 1.0
+    if len(freqs) > 1:
+        df = float(freqs[1] - freqs[0])
+        if not np.allclose(np.diff(freqs), df, rtol=1e-6, atol=0.0):
+            logger.warning(
+                "stack_channels: channel frequencies are not evenly spaced; "
+                "the cube's linear FREQ axis (CDELT3={} Hz) is approximate.",
+                df,
+            )
+    else:
+        # one channel: use its width
+        header0 = channels[0][3]
+        df = float(header0.get("CDELT3") or 1.0)
+        if (header0.get("CUNIT3") or "").strip().lower() == "mhz":
+            df *= 1e6
     out_header["CRPIX3"] = 1.0
     out_header["CRVAL3"] = float(freqs[0])
     out_header["CDELT3"] = float(df)

@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
+from astropy.wcs import WCS
 
 from skasim.config import (
     ImgConfig,
@@ -1070,3 +1071,51 @@ def test_wsclean_product_name_without_prefix_spots_channel_index():
     assert wsclean_product_name("x-0001-image.fits", None) == (None, True)
     assert wsclean_product_name("x-MFS-image.fits", None) == (None, False)
 
+
+def _wsclean_channel_image(path, freq_hz, width_hz, value):
+    """A per-channel image as WSClean writes it: its own one-pixel FREQ axis."""
+    header = fits.Header()
+    header["CTYPE1"], header["CRPIX1"], header["CRVAL1"], header["CDELT1"] = (
+        "RA---SIN", 2.0, 10.0, -1e-3
+    )
+    header["CTYPE2"], header["CRPIX2"], header["CRVAL2"], header["CDELT2"] = (
+        "DEC--SIN", 2.0, 2.0, 1e-3
+    )
+    header["CTYPE3"], header["CRPIX3"], header["CRVAL3"], header["CDELT3"] = (
+        "FREQ", 1.0, freq_hz, width_hz
+    )
+    header["CUNIT3"] = "Hz"
+    header["CTYPE4"], header["CRPIX4"], header["CRVAL4"], header["CDELT4"] = (
+        "STOKES", 1.0, 1.0, 1.0
+    )
+    data = np.full((1, 1, 3, 3), value, dtype=np.float32)
+    fits.writeto(path, data, header, overwrite=True)
+
+
+def test_stack_channels_uses_each_channel_frequency(tmp_path):
+    """The stacked FREQ axis starts at channel 0 and steps by the spacing.
+
+    WSClean's CRVAL3 is the channel's own centre; reading it as a cube-wide
+    reference used to double the spacing and shift the axis.
+    """
+    from skasim.imaging import stack_channels
+
+    start, width = 1417.6e6, 50e3
+    paths = []
+    for ch in range(4):
+        path = tmp_path / f"line_wsclean-{ch:04d}-image.fits"
+        _wsclean_channel_image(path, start + ch * width, width, float(ch))
+        paths.append(path)
+    out = tmp_path / "line_wsclean-cube-image.fits"
+
+    stack_channels(paths, out)
+
+    header = fits.getheader(out)
+    data = fits.getdata(out)
+    assert data.shape == (4, 3, 3)
+    assert [float(plane[0, 0]) for plane in data] == [0.0, 1.0, 2.0, 3.0]
+    assert header["CRPIX3"] == 1.0
+    assert header["CRVAL3"] == pytest.approx(start)
+    assert header["CDELT3"] == pytest.approx(width)
+    freqs = WCS(header).spectral.pixel_to_world(np.arange(4)).to_value(u.Hz)
+    np.testing.assert_allclose(freqs, start + np.arange(4) * width)
