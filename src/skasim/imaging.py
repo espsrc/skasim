@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -14,7 +15,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from loguru import logger
 
-from .config import ImgConfig, has_spectral_cube_model
+from .config import ImgConfig, resolve_spectral_mode
 from .manifest import RunContext
 from .runtime import require_karabo_module
 
@@ -42,6 +43,33 @@ def _resolve_spectral_cube_wsclean_config(
     if img_config.channels_out is None:
         kwargs["channels_out"] = n_channels
     return ImgConfig(**kwargs)
+
+
+def resolve_wsclean_img_config(
+    img_config: ImgConfig, spectral_mode: str, n_channels: int
+) -> ImgConfig:
+    """Return the WSClean settings actually used for one imaging block.
+
+    - ``cube``: per-channel imaging (see ``_resolve_spectral_cube_wsclean_config``).
+    - explicit ``continuum``: a single image of all channels combined
+      (``channels_out=1``, no channel joining) unless ``channels_out`` is set.
+    - ``auto`` resolving to continuum: the settings are used unchanged.
+    """
+    if spectral_mode == "cube":
+        return _resolve_spectral_cube_wsclean_config(img_config, n_channels)
+    if img_config.spectral_mode == "continuum" and img_config.channels_out is None:
+        kwargs = img_config.model_dump(exclude_unset=True)
+        kwargs["channels_out"] = 1
+        kwargs["join_channels"] = False
+        return ImgConfig(**kwargs)
+    return img_config
+
+
+def effective_wsclean_channels_out(img_config: ImgConfig, n_channels: int) -> int:
+    """Return the ``-channels-out`` value ``build_wsclean_argv`` will use."""
+    if img_config.channels_out is not None:
+        return int(img_config.channels_out)
+    return int(n_channels)
 
 
 # --------------------------------------------------------------------------- #
@@ -116,9 +144,7 @@ def build_wsclean_argv(
 ) -> list[str]:
     """Build a shell-free WSClean argv list from the resolved imaging config."""
     imaging_cellsize = fov / img_config.pixels
-    channels_out = (
-        img_config.channels_out if img_config.channels_out is not None else n_channels
-    )
+    channels_out = effective_wsclean_channels_out(img_config, n_channels)
 
     argv = shlex.split(img_config.wsclean_command) + [
         "-weight",
@@ -212,6 +238,38 @@ def collect_wsclean_outputs(work_dir: Path, output_prefix: str) -> list[Path]:
     return sorted(work_dir.glob(f"{output_prefix}*.fits"))
 
 
+_WSCLEAN_CHANNEL_INDEX = re.compile(r"^\d{4,}-")
+_WSCLEAN_TITLES = {
+    "image": "Cleaned image (WSClean)",
+    "model": "Component model (WSClean)",
+    "residual": "Residual (WSClean)",
+    "dirty": "Dirty image (WSClean)",
+    "psf": "Point spread function (WSClean)",
+}
+
+
+def wsclean_product_name(
+    filename: str, output_prefix: str | None
+) -> tuple[str | None, bool]:
+    """Split a WSClean output name into ``(product, per_channel)``.
+
+    WSClean names outputs ``<prefix>-<product>`` with ``-channels-out 1``, and
+    ``<prefix>-NNNN-<product>`` per channel plus ``<prefix>-MFS-<product>``
+    otherwise. ``product`` is e.g. ``image`` or ``psf`` (extension removed);
+    it is ``None`` when the name does not start with ``<prefix>-``, in which
+    case ``per_channel`` falls back to spotting a ``-NNNN-`` index.
+    """
+    name = Path(filename).name
+    if not output_prefix or not name.startswith(f"{output_prefix}-"):
+        return None, re.search(r"-\d{4,}-[^.]+\.\w+$", name) is not None
+    rest = name[len(output_prefix) + 1 :].rsplit(".", 1)[0]
+    per_channel = _WSCLEAN_CHANNEL_INDEX.match(rest) is not None
+    rest = _WSCLEAN_CHANNEL_INDEX.sub("", rest)
+    if rest.startswith("MFS-"):
+        rest = rest[len("MFS-") :]
+    return rest, per_channel
+
+
 def run_wsclean_imaging(
     ctx: RunContext,
     visibility_path: Path,
@@ -227,13 +285,10 @@ def run_wsclean_imaging(
 
     output_prefix = f"{img_config.tag}_wsclean"
 
-    # spectral-cube mode: force per-channel imaging and no joined-channel fit
-    spectral_cube_present = has_spectral_cube_model(ctx.config)
-    if spectral_cube_present:
-        img_config = _resolve_spectral_cube_wsclean_config(
-            img_config,
-            n_channels=n_channels,
-        )
+    # cube mode forces per-channel imaging; explicit continuum mode collapses
+    # all channels into one image (see resolve_wsclean_img_config)
+    spectral_mode = resolve_spectral_mode(img_config, ctx.config)
+    img_config = resolve_wsclean_img_config(img_config, spectral_mode, n_channels)
 
     argv = build_wsclean_argv(
         img_config,
@@ -260,26 +315,25 @@ def run_wsclean_imaging(
             logger.exception("Failed to clean up temp file %s", tmp)
 
     wsclean_outputs = collect_wsclean_outputs(work_dir, output_prefix)
-    mfs_files = [p.name for p in wsclean_outputs if "-MFS-" in p.name]
-    logger.info(f"MFS files: {mfs_files}")
+    # combined products: <prefix>-MFS-<product>, or <prefix>-<product> when
+    # WSClean writes a single output channel
+    combined_files = [
+        p.name
+        for p in wsclean_outputs
+        if not wsclean_product_name(p.name, output_prefix)[1]
+    ]
+    logger.info(f"Combined-channel files: {combined_files}")
 
     for img_path in wsclean_outputs:
         png_name = img_path.with_suffix(".png").name
         png_path = work_dir / png_name
 
         # infer image type from filename for correct plot title
+        product, per_channel = wsclean_product_name(img_path.name, output_prefix)
         title = "Imaging output (WSClean)"
-        if "MFS-image" in img_path.name:
-            title = "Cleaned image (WSClean)"
-        elif "MFS-model" in img_path.name:
-            title = "Component model (WSClean)"
-        elif "MFS-residual" in img_path.name:
-            title = "Residual (WSClean)"
-        elif "MFS-dirty" in img_path.name:
-            title = "Dirty image (WSClean)"
-        is_psf = "MFS-psf" in img_path.name
-        if is_psf:
-            title = "Point spread function (WSClean)"
+        if not per_channel:
+            title = _WSCLEAN_TITLES.get(product or "", title)
+        is_psf = not per_channel and product == "psf"
 
         if is_psf:
             try:
@@ -290,7 +344,9 @@ def run_wsclean_imaging(
         else:
             write_fits_preview(img_path, png_path, title)
         role = "image"
-        lower_name = img_path.name.lower()
+        # classify by the product part only, so a tag such as "model_test"
+        # does not turn every output into a model
+        lower_name = (product or img_path.name).lower()
         if "model" in lower_name:
             role = "model"
         elif "residual" in lower_name:
@@ -349,7 +405,7 @@ def run_wsclean_imaging(
             )
 
     # produce only moment 8 for spectral-cube clean outputs
-    if spectral_cube_present and img_config.imager == "wsclean":
+    if spectral_mode == "cube":
         from .loaders.image_models import run_moment8_for_spectral_cube
 
         run_moment8_for_spectral_cube(ctx, work_dir, output_prefix, img_config.tag)
@@ -383,7 +439,10 @@ def stack_channels(channel_paths: list[Path], output_path: Path) -> None:
         cunit3 = (header.get("CUNIT3") or "").strip().lower()
         if crval3 is None or cdelt3 is None:
             raise ValueError(f"{path}: missing CRVAL3/CDELT3")
-        freq_hz = crval3 + (ch - crpix3) * cdelt3
+        # Each WSClean channel image carries its own one-pixel FREQ axis: the
+        # channel centre is the world value at pixel 1 (CRVAL3 when CRPIX3 is
+        # 1) and CDELT3 is that channel's width, not a cube-wide spacing.
+        freq_hz = crval3 + (1.0 - crpix3) * cdelt3
         if cunit3 == "mhz":
             freq_hz *= 1e6
         channels.append((float(freq_hz), ch, data, header))
@@ -411,7 +470,20 @@ def stack_channels(channel_paths: list[Path], output_path: Path) -> None:
     out_header["NAXIS2"] = channels[0][3].get("NAXIS2")
     out_header["NAXIS3"] = len(channels)
     freqs = np.array([c[0] for c in channels])
-    df = freqs[1] - freqs[0] if len(freqs) > 1 else 1.0
+    if len(freqs) > 1:
+        df = float(freqs[1] - freqs[0])
+        if not np.allclose(np.diff(freqs), df, rtol=1e-6, atol=0.0):
+            logger.warning(
+                "stack_channels: channel frequencies are not evenly spaced; "
+                "the cube's linear FREQ axis (CDELT3={} Hz) is approximate.",
+                df,
+            )
+    else:
+        # one channel: use its width
+        header0 = channels[0][3]
+        df = float(header0.get("CDELT3") or 1.0)
+        if (header0.get("CUNIT3") or "").strip().lower() == "mhz":
+            df *= 1e6
     out_header["CRPIX3"] = 1.0
     out_header["CRVAL3"] = float(freqs[0])
     out_header["CDELT3"] = float(df)

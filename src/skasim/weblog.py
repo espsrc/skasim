@@ -17,6 +17,12 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from jinja2 import Environment, PackageLoader, select_autoescape
 
+from .config import resolve_spectral_mode
+from .imaging import (
+    effective_wsclean_channels_out,
+    resolve_wsclean_img_config,
+    wsclean_product_name,
+)
 from .loaders.image_models import (
     FitsCubeInfo,
     read_fits_cube_info,
@@ -95,10 +101,15 @@ def _find_science_products(manifest: RunManifest, work_dir: Path) -> list[dict]:
             continue
 
         role = output.role or ""
-        # Ignore per-channel WSClean outputs; keep MFS, cube_image, and moment8.
-        if output.imager == "wsclean" and "-MFS-" not in output.path:
-            if role not in ("cube_image", "moment8"):
-                continue
+        # Ignore per-channel WSClean outputs (<prefix>-NNNN-<product>). Keep
+        # combined products: <prefix>-MFS-<product>, or <prefix>-<product>
+        # when WSClean wrote a single output channel.
+        if (
+            output.imager == "wsclean"
+            and role not in ("cube_image", "moment8")
+            and wsclean_product_name(output.path, output.image_product_id)[1]
+        ):
+            continue
 
         product_id = output.image_product_id or "imaging"
         tag = (output.metadata or {}).get("tag", "default")
@@ -140,6 +151,7 @@ def _find_science_products(manifest: RunManifest, work_dir: Path) -> list[dict]:
         fpath = work_dir / output.path
         preview = fpath.with_suffix(".png")
         product[key] = {
+            "path": output.path,
             "fits": output.path,
             "preview": str(preview.relative_to(work_dir)) if preview.exists() else None,
             "data": _file_to_base64_data_uri(preview) if preview.exists() else None,
@@ -341,6 +353,12 @@ def _format_beam(beam: dict | None) -> str | None:
     return " · ".join(parts) if parts else None
 
 
+def _spectral_mode_label(spectral_mode: str) -> str:
+    if spectral_mode == "cube":
+        return "cube (one image per channel)"
+    return "continuum (channels combined)"
+
+
 def _imager_parameter_rows_for_block(
     img_config,
     manifest: RunManifest,
@@ -356,16 +374,15 @@ def _imager_parameter_rows_for_block(
     if fov_deg is not None:
         pixel_size_arcsec = fov_deg * 3600.0 / img_config.pixels
 
+    spectral_mode = resolve_spectral_mode(img_config, config)
     if img_config.imager == "wsclean":
-        # reflect any explicit overrides; default values match build_wsclean_argv
-        effective_channels_out = (
-            img_config.channels_out
-            if img_config.channels_out is not None
-            else min(n_channels, 8)
-        )
+        # show the settings run_wsclean_imaging actually used
+        img_config = resolve_wsclean_img_config(img_config, spectral_mode, n_channels)
+        effective_channels_out = effective_wsclean_channels_out(img_config, n_channels)
         rows = [
             ("Imager", "WSClean"),
             ("Command", img_config.wsclean_command),
+            ("Spectral mode", _spectral_mode_label(spectral_mode)),
             ("Weighting", f"Briggs robust {_format_float(img_config.robust)}"),
             (
                 "Multiscale",
@@ -674,7 +691,38 @@ def _report_warnings(manifest: RunManifest) -> list[str]:
         for w in block.get("warnings") or []:
             warnings.append(f"Geometry [{tag}]: {w}")
 
+    warnings.extend(_footprint_warnings(manifest))
+
+    modes = _find_milestone_details(manifest, "imaging_spectral_modes")
+    if modes.get("note"):
+        warnings.append(f"Imaging: {modes['note']}")
+
     return warnings
+
+
+def _footprint_warnings(manifest: RunManifest) -> list[str]:
+    """Flag image models reaching beyond the beam half-power or field radius."""
+    footprints = _find_milestone_details(manifest, "image_model_footprints")
+    messages = []
+    for record in footprints.get("entries") or []:
+        if record.get("beyond_field"):
+            limit = "simulation field radius"
+            limit_deg = record.get("field_radius_deg")
+            effect = "its outer parts are strongly attenuated"
+        elif record.get("beyond_beam_half_power"):
+            limit = "beam half-power radius"
+            limit_deg = record.get("beam_half_power_radius_deg")
+            effect = "its outer parts are attenuated by more than 50%"
+        else:
+            continue
+        messages.append(
+            f"Image model {record.get('model_entry_index')} "
+            f"({record.get('model_type')}) reaches "
+            f"{record.get('footprint_radius_deg', float('nan')) * 60:.2f}' from the "
+            f"phase centre, beyond the {limit} "
+            f"({(limit_deg or float('nan')) * 60:.2f}'); {effect}."
+        )
+    return messages
 
 
 def _milestone_detail_text(ms) -> str:
@@ -934,6 +982,228 @@ def _infer_image_caption(filename: str) -> str:
     if "telescope" in lower:
         return "Telescope layout"
     return fname  # fallback to filename
+
+
+_PHASE_CENTRE_RULE_LABELS = {
+    "explicit": "explicit center",
+    "catalogue": "catalogue centre",
+    "image_model": "first image model",
+    "default_field": "default field",
+    "generated_sources": "generated sources",
+}
+
+_COMPONENT_TYPE_LABELS = {
+    "continuum_i_alpha": "Continuum I+α",
+    "static_stokes_maps": "Static Stokes maps",
+    "casa_taylor_terms": "Taylor terms",
+    "spectral_cube": "Spectral cube",
+}
+
+
+def _attenuation_percent(intrinsic, attenuated) -> Optional[float]:
+    if intrinsic in (None, 0) or attenuated is None:
+        return None
+    return 100.0 * (1.0 - float(attenuated) / float(intrinsic))
+
+
+def _flux_display_unit(values) -> tuple:
+    """Pick one unit and decimal count so a flux column reads consistently.
+
+    Returns ``(unit, scale, decimals)`` with four significant digits for the
+    largest value.
+    """
+    finite = [abs(float(v)) for v in values if v is not None and np.isfinite(v)]
+    peak = max(finite) if finite else 0.0
+    for unit, scale in (("Jy", 1.0), ("mJy", 1e3), ("µJy", 1e6)):
+        if peak * scale >= 1.0 or unit == "µJy":
+            break
+    scaled_peak = peak * scale
+    magnitude = int(np.floor(np.log10(scaled_peak))) if scaled_peak > 0 else 0
+    return unit, scale, max(0, 3 - magnitude)
+
+
+def _sky_composition(manifest: RunManifest) -> Optional[dict]:
+    """Per-component positions and fluxes for combined (multimodal) runs.
+
+    Returns ``None`` unless the run injected at least one image model. The
+    catalogue row and every image row use the same beam, so the attenuated
+    fluxes are directly comparable.
+    """
+    injected = [
+        m.details or {} for m in manifest.milestones if m.name == "image_model_injected"
+    ]
+    if not injected:
+        return None
+
+    footprints = {
+        rec.get("model_entry_index"): rec
+        for rec in _find_milestone_details(manifest, "image_model_footprints").get(
+            "entries"
+        )
+        or []
+    }
+    rows = []
+    catalogue = _find_milestone_details(manifest, "catalogue_beam_flux")
+    if catalogue:
+        rows.append(
+            {
+                "component": "Catalogue",
+                "color": "catalog",
+                "source": f"{catalogue.get('n_sources')} sources",
+                "offset": (
+                    f"≤ {catalogue['max_offset_deg'] * 60:.2f}′"
+                    if catalogue.get("max_offset_deg") is not None
+                    else "—"
+                ),
+                "placement": "OSKAR",
+                "intrinsic_jy": catalogue.get("intrinsic_flux_jy_at_ref"),
+                "attenuated_jy": catalogue.get("attenuated_flux_jy_at_ref"),
+            }
+        )
+    for details in injected:
+        index = details.get("model_entry_index")
+        footprint = footprints.get(index, {})
+        model_type = details.get("model_type", "")
+        if details.get("resampled"):
+            placement = "regridded + shift"
+        elif details.get("shift_applied"):
+            placement = "shift"
+        elif details.get("wcs_placement") == "fits_wcs":
+            placement = "centred"
+        elif details.get("backend") == "casa_ft":
+            placement = "CASA ft"
+        else:
+            placement = "phase centre assumed"
+        offset = details.get("offset_arcsec")
+        if offset is None and footprint.get("centre_offset_deg") is not None:
+            offset = footprint["centre_offset_deg"] * 3600.0
+        source = footprint.get("source") or details.get("prefix") or ""
+        if model_type == "spectral_cube":
+            rows.append(
+                _cube_composition_row(details, index, source, offset, placement)
+            )
+            rows[-1]["beyond_half_power"] = footprint.get("beyond_beam_half_power")
+            continue
+        rows.append(
+            {
+                "component": f"Image {index}",
+                "color": "continuum",
+                "type": _COMPONENT_TYPE_LABELS.get(model_type, model_type),
+                "source": Path(str(source)).name if source else "",
+                "offset": f"{offset / 60.0:.2f}′" if offset is not None else "—",
+                "placement": placement,
+                "intrinsic_jy": details.get("intrinsic_flux_jy_at_ref"),
+                "attenuated_jy": details.get("attenuated_flux_jy_at_ref"),
+                "beyond_half_power": footprint.get("beyond_beam_half_power"),
+            }
+        )
+    for row in rows:
+        if "attenuation_pct" not in row:
+            row["attenuation_pct"] = _attenuation_percent(
+                row.get("intrinsic_jy"), row.get("attenuated_jy")
+            )
+    flux_unit, flux_scale, flux_decimals = _flux_display_unit(
+        [row.get("intrinsic_jy") for row in rows]
+        + [row.get("attenuated_jy") for row in rows]
+    )
+    for row in rows:
+        for key in ("intrinsic", "attenuated"):
+            value = row.get(f"{key}_jy")
+            row[f"{key}_text"] = (
+                f"{value * flux_scale:.{flux_decimals}f}" if value is not None else "—"
+            )
+
+    rule = _find_milestone_details(manifest, "phase_centre_resolved")
+    beam = _find_milestone_details(manifest, "primary_beam_configured")
+    completed = _find_milestone_details(manifest, "image_injection_completed")
+    ref_hz = beam.get("ref_freq_hz") or next(
+        (d.get("beam_ref_freq_hz") for d in injected if d.get("beam_ref_freq_hz")),
+        None,
+    )
+    return {
+        "rows": rows,
+        "flux_unit": flux_unit,
+        "phase_centre_rule": _phase_centre_rule_label(rule),
+        "phase_centre": (
+            SkyCoord(rule["ra_deg"] * u.deg, rule["dec_deg"] * u.deg).to_string(
+                "hmsdms", precision=2
+            )
+            if rule.get("ra_deg") is not None
+            else None
+        ),
+        "beam_power_fwhm_arcmin": (
+            beam["power_fwhm_deg_at_ref"] * 60.0
+            if beam.get("power_fwhm_deg_at_ref") is not None
+            else None
+        ),
+        "ref_freq_mhz": ref_hz / 1e6 if ref_hz else None,
+        "model_data_last_entry_only": completed.get("model_data_contents")
+        == "last_entry_only",
+        "n_merges": completed.get("n_merges"),
+        "has_line": any(row.get("line_text") for row in rows),
+        "line_notes": _line_notes(injected),
+    }
+
+
+def _phase_centre_rule_label(rule: dict) -> Optional[str]:
+    name = rule.get("rule")
+    label = _PHASE_CENTRE_RULE_LABELS.get(name, name)
+    if name == "image_model" and rule.get("model_type"):
+        kind = "Cube" if rule["model_type"] == "spectral_cube" else "Image"
+        label = f"{label} ({kind} {rule.get('model_entry_index')})"
+    return label
+
+
+def _cube_composition_row(
+    details: dict, index, source, offset: Optional[float], placement: str
+) -> dict:
+    """Sky-composition row for a spectral cube: line flux instead of continuum."""
+    unit = details.get("line_flux_unit")
+    intrinsic = details.get("intrinsic_line_flux")
+    attenuated = details.get("attenuated_line_flux")
+    line_text = None
+    if unit and attenuated is not None:
+        line_text = f"{attenuated:.4g}"
+        if intrinsic is not None:
+            line_text += f" of {intrinsic:.4g}"
+        line_text += f" {unit}"
+    channels = details.get("line_channels")
+    freqs = details.get("line_frequency_range_hz")
+    channel_text = None
+    if channels:
+        channel_text = f"ch {channels[0]}–{channels[1]}"
+        if freqs:
+            channel_text += f" ({freqs[0] / 1e6:.4f}–{freqs[1] / 1e6:.4f} MHz)"
+    return {
+        "component": f"Cube {index}",
+        "color": "spectral-cube",
+        "type": _COMPONENT_TYPE_LABELS.get("spectral_cube", "Spectral cube"),
+        "source": Path(str(source)).name if source else "",
+        "offset": f"{offset / 60.0:.2f}′" if offset is not None else "—",
+        "placement": placement,
+        "intrinsic_jy": None,
+        "attenuated_jy": None,
+        "line_text": line_text,
+        "line_channels_text": channel_text,
+        "attenuation_pct": _attenuation_percent(intrinsic, attenuated),
+    }
+
+
+def _line_notes(injected: list[dict]) -> list[str]:
+    """Spectral-frame assumption and channel warnings for the cubes of a run."""
+    notes = []
+    for details in injected:
+        if details.get("model_type") != "spectral_cube":
+            continue
+        label = f"Cube {details.get('model_entry_index')}"
+        specsys = details.get("specsys") or "not set"
+        notes.append(
+            f"{label}: SPECSYS {specsys}; frequencies used as observed (MS) "
+            "frequencies, no frame conversion"
+        )
+        for warning in details.get("warnings") or []:
+            notes.append(f"{label}: {warning}")
+    return notes
 
 
 def _sky_model_summary(manifest: RunManifest) -> list[dict]:
@@ -1275,6 +1545,18 @@ def render_weblog(manifest: RunManifest, work_dir: Path) -> str:
         )
 
     sky_model_summary = _sky_model_summary(manifest)
+    sky_composition = _sky_composition(manifest)
+    sky_composition_plot = None
+    for o in manifest.outputs:
+        if getattr(o, "role", None) != "sky_composition":
+            continue
+        fpath = work_dir / o.path
+        if fpath.exists():
+            sky_composition_plot = {
+                "path": o.path,
+                "data": _file_to_base64_data_uri(fpath),
+            }
+        break
     science_products = _find_science_products(manifest, work_dir)
     imaging_tabs = _build_imaging_tabs(
         manifest,
@@ -1300,6 +1582,8 @@ def render_weblog(manifest: RunManifest, work_dir: Path) -> str:
         sky_model_fov_plot=sky_model_fov_plot,
         input_cube_moment8_plot=input_cube_moment8_plot,
         sky_model_summary=sky_model_summary,
+        sky_composition=sky_composition,
+        sky_composition_plot=sky_composition_plot,
         fits_model_plots=fits_model_plots,
         observation_summary=_observation_summary(manifest),
         noise_summary=_noise_summary(manifest),

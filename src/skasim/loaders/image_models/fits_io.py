@@ -25,6 +25,11 @@ from ...config import (
     StaticStokesMapsModelEntry,
 )
 from ...image_geometry import MIN_IMAGE_PIXELS
+from ...primary_beam import (
+    GaussianStationBeam,
+    angular_separation_deg,
+    pixel_to_icrs_deg,
+)
 
 # suppress fits formatting fixes
 warnings.simplefilter("ignore", category=FITSFixedWarning)
@@ -54,20 +59,49 @@ def image_model_entries(config: SimConfig) -> list[ModelEntry]:
     ]
 
 
-def image_model_center(entries: list[ModelEntry]) -> SkyCoord | None:
-    """Return the centre of the first image model with usable celestial WCS."""
-    for entry in entries:
+def _cube_center(path: Path) -> SkyCoord | None:
+    """Centre of a cube's celestial grid, from the header only (no data read)."""
+    header = fits.getheader(path)
+    wcs = WCS(header).celestial
+    if wcs.naxis != 2:
+        return None
+    nx, ny = (int(n) for n in wcs.pixel_shape) if wcs.pixel_shape else (0, 0)
+    if not nx or not ny:
+        return None
+    center = wcs.pixel_to_world((nx - 1) / 2.0, (ny - 1) / 2.0)
+    return center.icrs if isinstance(center, SkyCoord) else None
+
+
+def image_model_center_entry(
+    entries: list[ModelEntry],
+) -> tuple[int, ModelEntry, SkyCoord] | None:
+    """Return ``(index, entry, centre)`` of the first entry with a usable WCS.
+
+    Spectral cubes count like any other image entry, in ``models`` order.
+    """
+    for index, entry in enumerate(entries):
         path = primary_model_fits_path(entry)
         if path is None:
             continue
         try:
-            info = read_fits_image_info(path)
+            if isinstance(entry, SpectralCubeModelEntry):
+                center = _cube_center(path)
+            else:
+                center = read_fits_image_info(path).center
         except Exception as exc:
             logger.debug(f"image_model_center: failed to read {path}: {exc}")
             continue
-        if info.center is not None:
-            return info.center
+        if center is not None:
+            # the phase centre is used as RA/Dec downstream; Galactic (or
+            # FK5) model WCS give centres in their own frame
+            return index, entry, center.icrs
     return None
+
+
+def image_model_center(entries: list[ModelEntry]) -> SkyCoord | None:
+    """Return the centre of the first image model with usable celestial WCS."""
+    found = image_model_center_entry(entries)
+    return found[2] if found is not None else None
 
 
 def primary_model_fits_path(entry: ModelEntry) -> Path | None:
@@ -78,7 +112,66 @@ def primary_model_fits_path(entry: ModelEntry) -> Path | None:
         for value in (entry.stokes_i, entry.stokes_q, entry.stokes_u, entry.stokes_v):
             if value:
                 return Path(value).expanduser().resolve()
+    if isinstance(entry, SpectralCubeModelEntry):
+        return Path(entry.cube).expanduser().resolve()
     return None
+
+
+def image_model_footprints(
+    entries: list[ModelEntry],
+    center: SkyCoord,
+    beam: GaussianStationBeam,
+    field_fov_deg: float,
+) -> list[dict]:
+    """Return each FITS image model's footprint relative to the phase centre.
+
+    The footprint radius is the largest angular distance of any pixel-edge
+    corner from the phase centre. It is compared with the shared beam's
+    half-power radius at its reference frequency and with the simulation
+    field radius, so heavily attenuated components can be flagged.
+    """
+    half_power_radius = float(beam.power_fwhm_deg(beam.ref_freq_hz)) / 2.0
+    field_radius = float(field_fov_deg) / 2.0
+    records = []
+    for index, entry in enumerate(entries):
+        path = primary_model_fits_path(entry)
+        if path is None:
+            continue
+        try:
+            header = fits.getheader(path)
+            wcs = WCS(header).celestial
+            nx = int(header["NAXIS1"])
+            ny = int(header["NAXIS2"])
+            xs = np.array([-0.5, nx - 0.5, nx - 0.5, -0.5])
+            ys = np.array([-0.5, -0.5, ny - 0.5, ny - 0.5])
+            ra, dec = pixel_to_icrs_deg(wcs, xs, ys)
+            centre_ra, centre_dec = pixel_to_icrs_deg(
+                wcs, (nx - 1) / 2.0, (ny - 1) / 2.0
+            )
+        except Exception as exc:
+            logger.debug(f"image_model_footprints: cannot read {path}: {exc}")
+            continue
+        icrs = center.icrs
+        radius = float(
+            np.max(angular_separation_deg(ra, dec, icrs.ra.deg, icrs.dec.deg))
+        )
+        offset = float(
+            angular_separation_deg(centre_ra, centre_dec, icrs.ra.deg, icrs.dec.deg)
+        )
+        records.append(
+            {
+                "model_entry_index": index,
+                "model_type": entry.type,
+                "source": str(path),
+                "centre_offset_deg": offset,
+                "footprint_radius_deg": radius,
+                "beam_half_power_radius_deg": half_power_radius,
+                "field_radius_deg": field_radius,
+                "beyond_beam_half_power": bool(radius > half_power_radius),
+                "beyond_field": bool(radius > field_radius),
+            }
+        )
+    return records
 
 
 @dataclass(frozen=True)
@@ -254,6 +347,13 @@ def validate_continuum_i_alpha(entry: ContinuumIAlphaModelEntry) -> dict:
 # ---------------------------------------------------------------------------
 
 
+FREQUENCY_INTERPRETATION = (
+    "cube frequencies are used as observed (MS) frequencies; SPECSYS is "
+    "recorded but not converted (issue #50)"
+)
+_VELOCITY_CTYPES = ("VRAD", "VOPT", "VELO", "FELO", "ZOPT", "VELOCITY")
+
+
 def _find_frequency_axis(header: fits.Header) -> int:
     """Return the 1-based FITS axis index whose CTYPE is FREQ."""
     naxis = int(header.get("NAXIS", 3))
@@ -261,6 +361,20 @@ def _find_frequency_axis(header: fits.Header) -> int:
         ctype = str(header.get(f"CTYPE{axis}", "")).strip().upper()
         if ctype.startswith("FREQ"):
             return axis
+    velocity = [
+        str(header.get(f"CTYPE{axis}", "")).strip()
+        for axis in range(1, naxis + 1)
+        if str(header.get(f"CTYPE{axis}", ""))
+        .strip()
+        .upper()
+        .startswith(_VELOCITY_CTYPES)
+    ]
+    if velocity:
+        raise ValueError(
+            f"spectral cube has a velocity axis ({velocity[0]}); only FREQ axes "
+            "are supported. Convert the spectral axis to frequency first "
+            "(velocity axes: https://github.com/espsrc/skasim/issues/50)."
+        )
     raise ValueError("spectral cube has no FREQ axis in CTYPE1..CTYPEn")
 
 
@@ -432,13 +546,12 @@ def validate_spectral_cube(
     obs: ObsConfig,
     img: ImgConfig,
 ) -> dict:
-    """Validate the spectral-cube contract against observation/imaging config.
+    """Validate the spectral-cube contract against the observation config.
 
-    The cube's spatial dimensions are checked against the user's explicit
-    ``pixels`` setting when present.  If ``pixels`` was not supplied (e.g. only
-    ``fov_deg`` was given and skasim derives the image size automatically), the
-    cube dimensions are accepted as the authoritative model geometry and a
-    warning is recorded so the run log remains traceable.
+    Checks the Jy/pixel unit, a minimum spatial size, and that the cube's
+    frequency range lies inside the observation band. The cube is placed on
+    sky from its own WCS, so its spatial grid is independent of the imaging
+    blocks; ``img`` is kept for API compatibility and is not used.
     """
     path = Path(entry.cube).expanduser().resolve()
     info = read_fits_cube_info(path)
@@ -448,30 +561,15 @@ def validate_spectral_cube(
             f"{path} must declare Jy/pixel-compatible BUNIT; found {info.unit!r}"
         )
 
+    # The cube is placed on sky from its own WCS and predicted on its own (or
+    # a regridded) grid, so its size is independent of the imaging blocks.
     spatial_shape = info.spatial_shape
-    if spatial_shape[0] != spatial_shape[1]:
+    if min(spatial_shape) < MIN_IMAGE_PIXELS:
         raise ValueError(
-            f"spectral_cube spatial dimensions {spatial_shape} must be square"
-        )
-    if spatial_shape[0] < MIN_IMAGE_PIXELS:
-        raise ValueError(
-            f"spectral_cube spatial dimension {spatial_shape[0]} is below the "
+            f"spectral_cube spatial dimensions {spatial_shape} are below the "
             f"minimum of {MIN_IMAGE_PIXELS} pixels"
         )
-
-    explicit_pixels = "pixels" in img.model_fields_set
-    if explicit_pixels and spatial_shape != (img.pixels, img.pixels):
-        raise ValueError(
-            f"spectral_cube spatial dimensions {spatial_shape} do not match "
-            f"the explicitly requested imaging pixels {img.pixels}"
-        )
-
     warnings: list[str] = []
-    if not explicit_pixels:
-        warnings.append(
-            f"spectral_cube spatial dimensions {spatial_shape} override the "
-            f"auto-derived imaging geometry because no explicit 'pixels' value was supplied"
-        )
 
     if (
         obs.bandwidth_mhz is None
@@ -499,6 +597,17 @@ def validate_spectral_cube(
             f"[{obs_min_hz:.3e}, {obs_max_hz:.3e}] Hz"
         )
 
+    ms_channel_width_hz = abs(obs.channel_width_mhz) * 1e6
+    if ms_channel_width_hz > abs(channel_width_hz) * (1.0 + 1e-6):
+        warnings.append(
+            f"MS channels ({ms_channel_width_hz / 1e3:.4g} kHz) are wider than the "
+            f"cube channels ({abs(channel_width_hz) / 1e3:.4g} kHz); the line is "
+            "smoothed onto the MS grid (flux is conserved)"
+        )
+    specsys = str(fits.getheader(path).get("SPECSYS") or "").strip() or None
+    for message in warnings:
+        logger.warning(f"spectral_cube {path.name}: {message}")
+
     logger.info(
         f"validate_spectral_cube: cube {n_channels} channels x {channel_width_hz:.3e} Hz "
         f"covering [{cube_min_hz:.3e}, {cube_max_hz:.3e}] Hz inside observation band "
@@ -514,5 +623,8 @@ def validate_spectral_cube(
         "channel_width_hz": channel_width_hz,
         "reference_frequency_hz": cube_center_hz,
         "frequency_range_hz": [cube_min_hz, cube_max_hz],
+        "ms_channel_width_hz": ms_channel_width_hz,
+        "specsys": specsys,
+        "frequency_interpretation": FREQUENCY_INTERPRETATION,
         "warnings": warnings,
     }

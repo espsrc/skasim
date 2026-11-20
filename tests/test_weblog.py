@@ -1,8 +1,10 @@
 """Weblog rendering behavior."""
 
+import re
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
+import pytest
 from astropy.io import fits
 
 from skasim.config import ImgConfig, ObsConfig, SimConfig
@@ -362,12 +364,6 @@ def test_sky_model_summary_typed_models(tmp_path):
                 "alpha": str(alpha_f),
                 "reference_frequency_hz": 1.4e9,
             },
-            {
-                "type": "casa_taylor_terms",
-                "tt0": str(tt0),
-                "tt1": str(tt1),
-                "reference_frequency_hz": 1.5e9,
-            },
         ]
     )
     manifest = RunManifest(
@@ -377,13 +373,32 @@ def test_sky_model_summary_typed_models(tmp_path):
     )
     summary = _sky_model_summary(manifest)
 
-    assert len(summary) == 3
+    assert len(summary) == 2
     assert summary[0]["label"] == "Catalog"
     assert summary[0]["source"] == "MIGHTEE"
     assert summary[1]["label"] == "Continuum I+α"
     assert str(stokes_i) in summary[1]["source"]
-    assert summary[2]["label"] == "Taylor terms (nterms=2)"
-    assert summary[2]["nterms"] == 2
+
+    # CASA ft entries are only valid on their own (multimodal runs reject them).
+    taylor_config = SimConfig(
+        models=[
+            {
+                "type": "casa_taylor_terms",
+                "tt0": str(tt0),
+                "tt1": str(tt1),
+                "reference_frequency_hz": 1.5e9,
+            },
+        ]
+    )
+    taylor_summary = _sky_model_summary(
+        RunManifest(
+            run_id="test-taylor",
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            config=taylor_config,
+        )
+    )
+    assert taylor_summary[0]["label"] == "Taylor terms (nterms=2)"
+    assert taylor_summary[0]["nterms"] == 2
 
 
 def test_sky_model_summary_legacy_catalog():
@@ -412,9 +427,12 @@ def test_sky_model_summary_weblog_renders_typed_labels(tmp_path):
     tt0_path = tmp_path / "tt0"
     tt0_path.touch()
 
-    config = SimConfig(
+    catalog_config = SimConfig(
+        models=[{"type": "component_sky_model", "catalog": "MIGHTEE"}]
+    )
+    # CASA ft entries are only valid on their own (multimodal runs reject them).
+    taylor_config = SimConfig(
         models=[
-            {"type": "component_sky_model", "catalog": "MIGHTEE"},
             {
                 "type": "casa_taylor_terms",
                 "tt0": str(tt0_path),
@@ -422,16 +440,18 @@ def test_sky_model_summary_weblog_renders_typed_labels(tmp_path):
             },
         ]
     )
-    manifest = RunManifest(
-        run_id="typed-labels",
-        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        config=config,
-    )
 
-    html = render_weblog(manifest, tmp_path)
+    htmls = []
+    for run_id, config in (("catalog", catalog_config), ("taylor", taylor_config)):
+        manifest = RunManifest(
+            run_id=run_id,
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            config=config,
+        )
+        htmls.append(render_weblog(manifest, tmp_path))
 
-    assert "Catalog" in html
-    assert "Taylor terms" in html
+    assert "Catalog" in htmls[0]
+    assert "Taylor terms" in htmls[1]
 
 
 def test_phase_centre_warning_flags_drift_beyond_tolerance(tmp_path):
@@ -570,3 +590,274 @@ def test_summary_card_reports_status_class_imagers_and_no_issues(tmp_path):
     assert 'class="badge success"' in html
     assert "WSClean" in html
     assert "No issues" in html
+
+
+# ---------------------------------------------------------------------------
+# multimodal input: sky composition table
+# ---------------------------------------------------------------------------
+
+
+def _composition_manifest():
+    manifest = RunManifest(
+        run_id="composition",
+        started_at=datetime(2026, 11, 3, tzinfo=timezone.utc),
+        config=SimConfig(),
+    )
+    manifest.add_milestone(
+        "phase_centre_resolved",
+        "completed",
+        details={"rule": "catalogue", "ra_deg": 150.0, "dec_deg": 2.0},
+    )
+    manifest.add_milestone(
+        "primary_beam_configured",
+        "completed",
+        details={
+            "power_fwhm_deg_at_ref": 0.35,
+            "ref_freq_hz": 1.4e9,
+            "field_fwhm_deg": 0.5,
+        },
+    )
+    manifest.add_milestone(
+        "catalogue_beam_flux",
+        "completed",
+        details={
+            "n_sources": 12,
+            "intrinsic_flux_jy_at_ref": 0.0125,
+            "attenuated_flux_jy_at_ref": 0.01,
+            "max_offset_deg": 0.2,
+        },
+    )
+    manifest.add_milestone(
+        "image_model_footprints",
+        "completed",
+        details={
+            "entries": [
+                {
+                    "model_entry_index": 0,
+                    "source": "/data/target.fits",
+                    "centre_offset_deg": 0.1,
+                    "beyond_beam_half_power": True,
+                }
+            ]
+        },
+    )
+    manifest.add_milestone(
+        "image_model_injected",
+        "completed",
+        details={
+            "model_entry_index": 0,
+            "model_type": "continuum_i_alpha",
+            "backend": "wsclean_predict",
+            "wcs_placement": "fits_wcs",
+            "resampled": True,
+            "shift_applied": True,
+            "offset_arcsec": 360.0,
+            "intrinsic_flux_jy_at_ref": 0.004,
+            "attenuated_flux_jy_at_ref": 0.002,
+        },
+    )
+    manifest.add_milestone(
+        "image_injection_completed",
+        "completed",
+        details={"n_merges": 1, "model_data_contents": "last_entry_only"},
+    )
+    return manifest
+
+
+def test_sky_composition_rows_share_one_flux_unit():
+    from skasim.weblog import _sky_composition
+
+    composition = _sky_composition(_composition_manifest())
+
+    assert composition["flux_unit"] == "mJy"
+    catalogue, image = composition["rows"]
+    assert catalogue["component"] == "Catalogue"
+    assert catalogue["intrinsic_text"] == "12.50"
+    assert catalogue["attenuation_pct"] == pytest.approx(20.0)
+    assert image["component"] == "Image 0"
+    assert image["source"] == "target.fits"
+    assert image["placement"] == "regridded + shift"
+    assert image["offset"] == "6.00′"
+    assert image["attenuated_text"] == "2.00"
+    assert image["beyond_half_power"] is True
+    assert composition["phase_centre_rule"] == "catalogue centre"
+    assert composition["beam_power_fwhm_arcmin"] == pytest.approx(21.0)
+    assert composition["model_data_last_entry_only"] is True
+
+
+def test_sky_composition_absent_without_image_models():
+    from skasim.weblog import _sky_composition
+
+    manifest = RunManifest(
+        run_id="catalogue-only",
+        started_at=datetime(2026, 11, 3, tzinfo=timezone.utc),
+        config=SimConfig(),
+    )
+
+    assert _sky_composition(manifest) is None
+
+
+def test_weblog_renders_sky_composition_section(tmp_path):
+    manifest = _composition_manifest()
+    manifest.config = SimConfig(
+        models=[{"type": "component_sky_model", "catalog": "GLEAM"}]
+    )
+
+    html = render_weblog(manifest, tmp_path)
+
+    assert "Sky composition" in html
+    assert "regridded + shift" in html
+    assert "Intrinsic (mJy)" in html
+    assert "holds only the last image model" in html
+
+
+def test_weblog_shows_single_channel_wsclean_products(tmp_path):
+    """continuum mode: WSClean writes <prefix>-<product>.fits (no -MFS-).
+
+    Those products must be shown with stats; per-channel <prefix>-NNNN-*
+    outputs stay hidden.
+    """
+    manifest = RunManifest(
+        run_id="single-channel",
+        started_at=datetime(2026, 11, 19, 12, 0, 0, tzinfo=timezone.utc),
+        config=SimConfig(),
+    )
+    prefix = "cont_wsclean"
+    stems = [f"{prefix}-{role}" for role in ("model", "image", "residual", "psf")]
+    stems.append(f"{prefix}-0003-image")  # a per-channel product (hidden)
+    for stem in stems:
+        role = stem.rsplit("-", 1)[1]
+        data = np.array([[1.0e-3, 2.0e-3], [3.0e-3, 4.0e-3]])
+        if role == "residual":
+            data = np.array([[0.0, 1.0e-6], [-1.0e-6, 0.0]])
+        if "-0003-" in stem:
+            data = data * 100.0  # would change the peak if it were picked up
+        header = fits.Header()
+        header["BMAJ"] = 2.0 / 3600.0
+        header["BMIN"] = 1.0 / 3600.0
+        header["BPA"] = 35.0
+        fits.writeto(tmp_path / f"{stem}.fits", data, header, overwrite=True)
+        manifest.add_output(
+            "image_product",
+            f"{stem}.fits",
+            image_product_id=prefix,
+            imager="wsclean",
+            role=role,
+        )
+
+    html = render_weblog(manifest, tmp_path)
+
+    assert "Science Products" in html
+    assert "Clean" in html
+    assert "Residual" in html
+    assert "Peak:" in html
+    assert "4.000 mJy/beam" in html
+    assert "400.000 mJy/beam" not in html
+    assert "Beam: 2.000 arcsec x 1.000 arcsec" in html
+
+
+def test_weblog_shows_effective_spectral_mode_and_channels_out(tmp_path):
+    """The imaging table shows the spectral mode and the channels WSClean used."""
+    manifest = RunManifest(
+        run_id="modes",
+        started_at=datetime(2026, 11, 5, 12, 0, 0, tzinfo=timezone.utc),
+        config=SimConfig(
+            observation=ObsConfig(bandwidth_mhz=40.96, n_channels=2048),
+            imaging=[
+                ImgConfig(
+                    tag="cont",
+                    imager="wsclean",
+                    pixels=256,
+                    spectral_mode="continuum",
+                )
+            ],
+        ),
+    )
+    manifest.add_output(
+        "image_product",
+        "cont_wsclean-image.fits",
+        image_product_id="cont_wsclean",
+        imager="wsclean",
+        role="image",
+    )
+
+    html = render_weblog(manifest, tmp_path)
+
+    assert "Spectral mode" in html
+    assert "continuum (channels combined)" in html
+    assert re.search(r"Channels out</th>\s*<td>\s*1\s*<", html)
+
+
+def test_weblog_warns_when_cube_run_has_no_continuum_block(tmp_path):
+    from skasim.pipeline import NO_CONTINUUM_BLOCK_NOTE
+    from skasim.weblog import _report_warnings
+
+    manifest = RunManifest(
+        run_id="no-cont",
+        started_at=datetime(2026, 11, 5, 12, 0, 0, tzinfo=timezone.utc),
+        config=SimConfig(),
+    )
+    manifest.add_milestone(
+        "imaging_spectral_modes",
+        "completed",
+        details={"modes": {"line": "cube"}, "note": NO_CONTINUUM_BLOCK_NOTE},
+    )
+
+    assert f"Imaging: {NO_CONTINUUM_BLOCK_NOTE}" in _report_warnings(manifest)
+
+
+def _cube_composition_manifest():
+    manifest = _composition_manifest()
+    manifest.add_milestone(
+        "image_model_injected",
+        "completed",
+        details={
+            "model_entry_index": 1,
+            "model_type": "spectral_cube",
+            "backend": "wsclean_predict",
+            "wcs_placement": "fits_wcs",
+            "resampled": False,
+            "shift_applied": True,
+            "offset_arcsec": 240.0,
+            "line_flux_unit": "Jy km/s",
+            "intrinsic_line_flux": 1.25,
+            "attenuated_line_flux": 1.0,
+            "line_channels": [120, 180],
+            "line_frequency_range_hz": [1.4182e9, 1.4194e9],
+            "specsys": "BARYCENT",
+            "warnings": ["MS channels (40 kHz) are wider than the cube channels"],
+        },
+    )
+    return manifest
+
+
+def test_sky_composition_has_a_line_row_for_cubes():
+    from skasim.weblog import _sky_composition
+
+    composition = _sky_composition(_cube_composition_manifest())
+
+    cube = next(row for row in composition["rows"] if row["component"] == "Cube 1")
+    assert composition["has_line"] is True
+    assert cube["line_text"] == "1 of 1.25 Jy km/s"
+    assert cube["line_channels_text"].startswith("ch 120–180")
+    assert cube["attenuation_pct"] == pytest.approx(20.0)
+    assert cube["intrinsic_text"] == "—"
+    assert any("SPECSYS BARYCENT" in note for note in composition["line_notes"])
+    assert any("wider than the cube" in note for note in composition["line_notes"])
+
+
+def test_weblog_renders_line_column_and_cube_phase_centre(tmp_path):
+    manifest = _cube_composition_manifest()
+    manifest.config = SimConfig(
+        models=[{"type": "component_sky_model", "catalog": "GLEAM"}]
+    )
+    manifest.milestones[0].details.update(
+        rule="image_model", model_entry_index=1, model_type="spectral_cube"
+    )
+
+    html = render_weblog(manifest, tmp_path)
+
+    assert "Line flux in beam" in html
+    assert "1 of 1.25 Jy km/s" in html
+    assert "first image model (Cube 1)" in html
+    assert "Line cubes" in html

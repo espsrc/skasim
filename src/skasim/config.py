@@ -335,6 +335,9 @@ class ImgConfig(BaseModel):
     local_rms: Optional[bool] = None
     join_channels: Optional[bool] = None
     channels_out: Optional[int] = None
+    # "cube": one image per channel (line work); "continuum": all channels
+    # combined; "auto": cube when the run has a spectral_cube model entry.
+    spectral_mode: Literal["auto", "cube", "continuum"] = "auto"
     padding: Optional[float] = None
     threads: Optional[int] = None
 
@@ -378,6 +381,15 @@ class ImgConfig(BaseModel):
         if self.cell_size_arcsec is None:
             explicit.discard("cell_size_arcsec")
         return explicit
+
+    @model_validator(mode="after")
+    def _validate_spectral_mode(self):
+        if self.spectral_mode == "cube" and self.imager != "wsclean":
+            raise ValueError(
+                "spectral_mode='cube' requires imager='wsclean'; the OSKAR dirty "
+                "imager always combines all channels into one image."
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_image_geometry(self):
@@ -543,18 +555,19 @@ class SimConfig(BaseModel):
             if component_count > 1:
                 raise ValueError("Provide at most one component_sky_model entry.")
 
-            # spectral_cube is exclusive; it cannot coexist with other model types
-            cube_count = sum(
-                1
+            # CASA ft entries get neither the shared primary beam nor WCS
+            # placement, so they are only valid as the sole model entry.
+            ft_types = [
+                model.type
                 for model in self.models
-                if getattr(model, "type", None) == "spectral_cube"
-            )
-            if cube_count > 1:
-                raise ValueError("Provide at most one spectral_cube entry.")
-            if cube_count == 1 and len(self.models) > 1:
+                if getattr(model, "injection_backend", None) == "casa_ft"
+            ]
+            if ft_types and len(self.models) > 1:
                 raise ValueError(
-                    "spectral_cube mode is exclusive and cannot be mixed with other "
-                    "model entries."
+                    "Model entries using the deprecated casa_ft backend "
+                    f"({', '.join(sorted(set(ft_types)))}) cannot be combined with "
+                    "other model entries; use continuum_i_alpha with "
+                    "injection_backend='wsclean_predict' for multimodal runs."
                 )
 
             self.source_flux_jy = []
@@ -626,6 +639,19 @@ def has_spectral_cube_model(config: SimConfig) -> bool:
     return any(
         getattr(model, "type", None) == "spectral_cube" for model in config.models
     )
+
+
+def resolve_spectral_mode(img_config: ImgConfig, config: SimConfig) -> str:
+    """Return the effective spectral mode ("cube" or "continuum") of a block.
+
+    ``auto`` keeps the historical behaviour: per-channel cube imaging when the
+    run has a spectral_cube entry (WSClean only), otherwise continuum.
+    """
+    if img_config.spectral_mode != "auto":
+        return img_config.spectral_mode
+    if img_config.imager == "wsclean" and has_spectral_cube_model(config):
+        return "cube"
+    return "continuum"
 
 
 def spectral_cube_model_entries(config: SimConfig) -> list:

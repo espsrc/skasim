@@ -1,0 +1,59 @@
+{
+    "title": "Multimodal demo: catalogue + continuum image + HI cube",
+    "description": "VLA-C composite at 1420 MHz: component catalogue, a compact continuum I+alpha image model and a compact HI line cube on the same position 7.2 arcmin from the phase centre (both on TAN grids, so regridded). Three imaging blocks: OSKAR dirty continuum, a WSClean dirty line cube and a CLEANed WSClean continuum image, on which check_multimodal_run.py measures continuum peaks (dirty-beam sidelobes of nearby sources bias dirty peaks). Generate the models with scripts/make_multimodal_cube_demo_models.py and check the result with scripts/check_multimodal_run.py.",
+    "telescope": "VLA",
+    "telescope_version": "C",
+    "models": [
+        {
+            "type": "component_sky_model",
+            "path": "configs/fits_model/quick_component_catalog.json",
+            "sky_format": "json"
+        },
+        {
+            "type": "continuum_i_alpha",
+            "stokes_i": "configs/fits_model/generated/mm_hi_continuum_i.fits",
+            "alpha": "configs/fits_model/generated/mm_hi_continuum_alpha.fits",
+            "reference_frequency_hz": 1420000000.0
+        },
+        {
+            "type": "spectral_cube",
+            "cube": "configs/fits_model/generated/mm_hi_cube.fits"
+        }
+    ],
+    "center": "15h31m25.36s 35d33m40.2s",
+    "observation": {
+        "frequency_mhz": 1420.0,
+        "bandwidth_mhz": 4.8,
+        "n_channels": 96,
+        "observation_time_s": 7200
+    },
+    "uv_coverage": false,
+    "imaging": [
+        {
+            "tag": "cont",
+            "pixels": 512,
+            "cell_size_arcsec": 3.0,
+            "imager": "oskar-dirty",
+            "spectral_mode": "continuum"
+        },
+        {
+            "tag": "line",
+            "pixels": 512,
+            "cell_size_arcsec": 3.0,
+            "imager": "wsclean",
+            "spectral_mode": "cube",
+            "clean_iterations": 0
+        },
+        {
+            "tag": "clean",
+            "pixels": 512,
+            "cell_size_arcsec": 3.0,
+            "imager": "wsclean",
+            "spectral_mode": "continuum",
+            "multiscale": false,
+            "clean_iterations": 10000
+        }
+    ],
+    "output_dir": "demo_output/fits_model_vla_c_catalog_image_hi_cube_quick",
+    "overwrite": true
+}

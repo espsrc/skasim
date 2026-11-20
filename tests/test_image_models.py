@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import astropy.units as u
 import numpy as np
 import pytest
+from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS
 
@@ -23,6 +24,8 @@ from skasim.loaders.image_models import (
     _resample_spectral_axis_to_ms_channels,
     _set_crval4_via_script,
     image_model_center,
+    image_model_center_entry,
+    image_model_footprints,
     inject_image_models,
     merge_model_data_into_data,
     prepare_casa_taylor_terms,
@@ -45,6 +48,7 @@ from skasim.loaders.wsclean_predict import (
     inject_static_stokes_i_with_wsclean_predict,
 )
 from skasim.manifest import RunManifest, create_run_context
+from skasim.primary_beam import GaussianStationBeam
 from skasim.weblog import render_weblog
 
 
@@ -165,6 +169,47 @@ def test_image_model_center_uses_first_model_wcs(tmp_path):
     assert center.dec.deg == pytest.approx(2.0, abs=1e-3)
 
 
+def _write_galactic_cube(tmp_path, centre, pixels=32, cdelt_deg=1e-3):
+    """A spectral cube with GLON/GLAT axes whose centre pixel is ``centre``."""
+    galactic = centre.galactic
+    wcs = WCS(naxis=3)
+    wcs.wcs.ctype = ["GLON-SIN", "GLAT-SIN", "FREQ"]
+    wcs.wcs.crval = [galactic.l.deg, galactic.b.deg, 1.4e9]
+    # 1-based CRPIX of the 0-based centre pixel (pixels - 1) / 2
+    wcs.wcs.crpix = [(pixels + 1) / 2.0, (pixels + 1) / 2.0, 1.0]
+    wcs.wcs.cdelt = [-cdelt_deg, cdelt_deg, 1e5]
+    wcs.wcs.cunit = ["deg", "deg", "Hz"]
+    header = wcs.to_header()
+    header["BUNIT"] = "Jy/pixel"
+    path = tmp_path / "galactic_cube.fits"
+    data = np.zeros((4, pixels, pixels), dtype=np.float32)
+    fits.writeto(path, data, header, overwrite=True)
+    return path
+
+
+def test_galactic_model_centre_and_footprint_are_icrs(tmp_path):
+    """A GLON/GLAT model gives an ICRS phase centre and correct footprint offsets."""
+    centre = SkyCoord(232.855667, 35.561167, unit="deg")
+    cube = _write_galactic_cube(tmp_path, centre)
+    cfg = SimConfig(models=[{"type": "spectral_cube", "cube": str(cube)}])
+
+    index, _entry, found = image_model_center_entry(cfg.models)
+
+    assert index == 0
+    # build_observation reads .ra/.dec, so the centre must be equatorial
+    assert found.frame.name == "icrs"
+    assert found.separation(centre).arcsec < 1e-3
+    assert image_model_center(cfg.models).frame.name == "icrs"
+
+    beam = GaussianStationBeam(field_fwhm_deg=1.0, ref_freq_hz=1.4e9)
+    [record] = image_model_footprints(cfg.models, centre, beam, 1.0)
+    assert record["centre_offset_deg"] < 1e-6
+    # half the diagonal of a 32 x 1e-3 deg square
+    assert record["footprint_radius_deg"] == pytest.approx(
+        np.sqrt(2.0) * 16 * 1e-3, rel=1e-3
+    )
+
+
 def test_weblog_renders_fits_model_preview(tmp_path):
     """FITS model previews appear in the weblog Sky Model section."""
     pytest.importorskip("aplpy")
@@ -265,17 +310,10 @@ def test_weblog_renders_casa_taylor_term_preview(tmp_path, monkeypatch):
 
 
 def test_inject_image_models_runs_continuum_entries_in_order(tmp_path, monkeypatch):
-    """Image injection validates entries, predicts with CASA ft, and merges once."""
+    """A lone CASA ft entry predicts non-incrementally and is merged once."""
     stokes_i, alpha = _write_model_pair(tmp_path)
     cfg = SimConfig(
         models=[
-            {
-                "type": "continuum_i_alpha",
-                "stokes_i": str(stokes_i),
-                "alpha": str(alpha),
-                "reference_frequency_hz": 1.4e9,
-                "injection_backend": "casa_ft",
-            },
             {
                 "type": "continuum_i_alpha",
                 "stokes_i": str(stokes_i),
@@ -334,18 +372,16 @@ def test_inject_image_models_runs_continuum_entries_in_order(tmp_path, monkeypat
 
     inject_image_models(ctx, visibility_path=Path("fake.ms"))
 
-    # two entries -> two ft calls + one merge
-    assert len(calls) == 3
-    ft_calls = [c for c in calls if "visibility_path" in c]
-    assert ft_calls[0].get("incremental") is False
-    assert ft_calls[1].get("incremental") is True
-    assert any(c.get("merged") == "fake.ms" for c in calls)
+    # one entry -> one non-incremental ft call, then its merge
+    assert len(calls) == 2
+    assert calls[0].get("incremental") is False
+    assert calls[1] == {"merged": "fake.ms"}
 
 
 def test_inject_image_models_runs_continuum_entries_with_wsclean_predict(
     tmp_path, monkeypatch
 ):
-    """Two continuum entries run wsclean-predict in order and merge once."""
+    """Each wsclean-predict entry is merged into DATA before the next predict."""
     stokes_i, alpha = _write_model_pair(tmp_path)
     cfg = SimConfig(
         models=[
@@ -381,7 +417,9 @@ def test_inject_image_models_runs_continuum_entries_with_wsclean_predict(
         assert ctx_arg is ctx
         return Product(index)
 
-    def fake_inject(ctx_arg, entry, index, visibility_path, img_config, product):
+    def fake_inject(
+        ctx_arg, entry, index, visibility_path, img_config, product, **kwargs
+    ):
         calls.append(
             {
                 "backend": "wsclean_predict",
@@ -409,11 +447,20 @@ def test_inject_image_models_runs_continuum_entries_with_wsclean_predict(
 
     inject_image_models(ctx, visibility_path=Path("fake.ms"))
 
-    assert len(calls) == 3
-    predict_calls = [c for c in calls if c.get("backend") == "wsclean_predict"]
-    assert predict_calls[0]["index"] == 0
-    assert predict_calls[1]["index"] == 1
-    assert any(c.get("merged") == "fake.ms" for c in calls)
+    # wsclean -predict overwrites MODEL_DATA, so every entry must be merged
+    # before the next prediction: predict0, merge, predict1, merge.
+    assert [c.get("index", c.get("merged")) for c in calls] == [
+        0,
+        "fake.ms",
+        1,
+        "fake.ms",
+    ]
+    merges = [m for m in ctx.manifest.milestones if m.name == "image_model_merged"]
+    assert [m.details["model_entry_index"] for m in merges] == [0, 1]
+    completed = [
+        m for m in ctx.manifest.milestones if m.name == "image_injection_completed"
+    ][-1]
+    assert completed.details["model_data_contents"] == "last_entry_only"
 
 
 def test_merge_model_data_into_data(monkeypatch, tmp_path):
@@ -705,6 +752,8 @@ def test_inject_image_models_runs_spectral_cube_with_wsclean_predict(
 ):
     """Spectral-cube entries use wsclean -predict; ft is not called."""
     cube_path = _write_spectral_cube(tmp_path, n_channels=8, pixels=64, freq_mhz=700.0)
+    with fits.open(cube_path, mode="update") as hdul:
+        hdul[0].data[3:5, 30, 30] = 1.0
     cfg = SimConfig(
         output_dir=str(tmp_path / "run"),
         models=[
@@ -861,10 +910,12 @@ def test_merge_model_data_into_data_adds_model_column(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _write_static_stokes_image(tmp_path, shape=(16, 16), bunit="Jy/pixel", ndim=2):
+def _write_static_stokes_image(
+    tmp_path, shape=(16, 16), bunit="Jy/pixel", ndim=2, projection="TAN"
+):
     """Create a minimal valid 2D FITS image for static_stokes_maps tests."""
     wcs = WCS(naxis=2)
-    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    wcs.wcs.ctype = [f"RA---{projection}", f"DEC--{projection}"]
     wcs.wcs.crval = [10.0, 2.0]
     wcs.wcs.crpix = [shape[1] / 2.0, shape[0] / 2.0]
     wcs.wcs.cdelt = [-0.001, 0.001]
@@ -952,7 +1003,7 @@ def test_inject_static_stokes_i_runs_wsclean_predict_and_merges(tmp_path, monkey
     ctx = create_run_context(cfg)
     calls = []
 
-    def fake_inject(ctx_arg, entry, index, visibility_path, img_config):
+    def fake_inject(ctx_arg, entry, index, visibility_path, img_config, **kwargs):
         calls.append(
             {
                 "backend": "wsclean_predict",
@@ -1215,15 +1266,47 @@ def test_validate_spectral_cube_accepts_narrow_cube_inside_wide_observation(tmp_
     assert report["n_channels"] == 8
 
 
-def test_validate_spectral_cube_rejects_spatial_shape_mismatch(tmp_path):
-    """Cube spatial dimensions must match imaging pixels."""
+def test_validate_spectral_cube_accepts_size_independent_of_imaging(tmp_path):
+    """The cube is placed from its own WCS, so imaging pixels need not match."""
     cube_path = _write_spectral_cube(tmp_path, n_channels=8, pixels=128)
     obs = ObsConfig(frequency_mhz=700.0, bandwidth_mhz=100.0, n_channels=8)
     img = ImgConfig(pixels=64)
     entry = SpectralCubeModelEntry(type="spectral_cube", cube=str(cube_path))
 
-    with pytest.raises(ValueError, match="spatial dimensions"):
-        validate_spectral_cube(entry, obs, img)
+    report = validate_spectral_cube(entry, obs, img)
+
+    assert report["spatial_shape"] == [128, 128]
+    assert report["warnings"] == []
+    assert report["specsys"] is None
+    assert "observed" in report["frequency_interpretation"]
+
+
+def test_validate_spectral_cube_warns_when_ms_channels_are_wider(tmp_path):
+    """Coarser MS channels smooth the line; the run records it."""
+    cube_path = _write_spectral_cube(
+        tmp_path, n_channels=16, pixels=64, freq_mhz=700.0, df_mhz=0.1
+    )
+    with fits.open(cube_path, mode="update") as hdul:
+        hdul[0].header["SPECSYS"] = "BARYCENT"
+    obs = ObsConfig(frequency_mhz=700.0, bandwidth_mhz=3.2, n_channels=8)
+    entry = SpectralCubeModelEntry(type="spectral_cube", cube=str(cube_path))
+
+    report = validate_spectral_cube(entry, obs, ImgConfig(pixels=64))
+
+    assert report["specsys"] == "BARYCENT"
+    assert any("wider than the cube channels" in w for w in report["warnings"])
+
+
+def test_validate_spectral_cube_rejects_velocity_axis(tmp_path):
+    """Velocity spectral axes are rejected with a pointer to issue #50."""
+    cube_path = _write_spectral_cube(tmp_path, n_channels=8, pixels=64)
+    with fits.open(cube_path, mode="update") as hdul:
+        hdul[0].header["CTYPE3"] = "VRAD"
+    obs = ObsConfig(frequency_mhz=700.0, bandwidth_mhz=100.0, n_channels=8)
+    entry = SpectralCubeModelEntry(type="spectral_cube", cube=str(cube_path))
+
+    with pytest.raises(ValueError, match="velocity axis .*VRAD.*issues/50"):
+        validate_spectral_cube(entry, obs, ImgConfig(pixels=64))
 
 
 def test_validate_spectral_cube_rejects_bad_bunit(tmp_path):
@@ -1298,6 +1381,12 @@ def test_prepare_spectral_cube_for_casa_writes_3d_fits_for_wsclean_predict(
     assert header["CTYPE2"] == "DEC--SIN"
     assert header["CTYPE3"] == "FREQ"
     assert header["CUNIT3"] == "Hz"
+    # The cube's own celestial WCS and rest frequency are kept, not replaced.
+    assert header["CRVAL1"] == pytest.approx(10.0)
+    assert header["CRVAL2"] == pytest.approx(2.0)
+    assert header["CRPIX1"] == pytest.approx(32.5)
+    assert header["RESTFRQ"] == pytest.approx(700e6)
+    assert "SPECSYS" not in header
     assert product.nterms == 1
     assert product.reffreq == "700000000.0Hz"
     assert np.array_equal(product.cube_data, data)
@@ -1603,3 +1692,158 @@ def test_set_spectral_coordinate_fallback_handles_mixed_axes(monkeypatch, tmp_pa
         assert f"imagename={str(path)!r}" in line
         assert f"hdkey='crval{axis}'" in line
         assert "hdvalue='1310000000.0Hz'" in line
+
+
+# ---------------------------------------------------------------------------
+# multimodal input: shared primary beam applied to image models
+# ---------------------------------------------------------------------------
+
+
+def _static_stokes_cfg(image_path, tmp_path):
+    return SimConfig(
+        output_dir=str(tmp_path / "run"),
+        models=[
+            StaticStokesMapsModelEntry(
+                type="static_stokes_maps", stokes_i=str(image_path)
+            )
+        ],
+        observation=ObsConfig(
+            frequency_mhz=700.0,
+            bandwidth_mhz=100.0,
+            n_channels=4,
+            observation_time_s=1,
+        ),
+        imaging=[ImgConfig(pixels=64, imager="wsclean")],
+    )
+
+
+def test_static_stokes_planes_are_attenuated_by_shared_beam(tmp_path, monkeypatch):
+    """Every per-channel plane is multiplied by the OSKAR-equivalent power beam."""
+    from astropy.coordinates import SkyCoord
+
+    from skasim.primary_beam import GaussianStationBeam, angular_separation_deg
+
+    image_path = _write_static_stokes_image(tmp_path, shape=(64, 64), projection="SIN")
+    cfg = _static_stokes_cfg(image_path, tmp_path)
+    ctx = create_run_context(cfg)
+    monkeypatch.setattr(
+        "skasim.loaders.wsclean_predict.run_wsclean_predict", lambda **kwargs: None
+    )
+    beam = GaussianStationBeam(field_fwhm_deg=0.08, ref_freq_hz=700e6)
+    phase_center = SkyCoord(10.0, 2.0, unit="deg")
+
+    report = inject_static_stokes_i_with_wsclean_predict(
+        ctx,
+        cfg.models[0],
+        0,
+        Path("fake.ms"),
+        cfg.imaging[0],
+        phase_center=phase_center,
+        beam=beam,
+    )
+
+    with fits.open(image_path) as hdul:
+        wcs = WCS(hdul[0].header).celestial
+    yy, xx = np.mgrid[0:64, 0:64]
+    ra, dec = wcs.all_pix2world(xx, yy, 0)
+    sep = angular_separation_deg(ra, dec, 10.0, 2.0)
+    for i, path_str in enumerate(report["model_paths"]):
+        freq_hz = (650.0 + (i + 0.5) * 25.0) * 1e6
+        with fits.open(path_str) as hdul:
+            plane = np.asarray(hdul[0].data)[0]
+        np.testing.assert_allclose(plane, beam.power_response(sep, freq_hz), rtol=1e-5)
+
+    assert report["primary_beam_applied"] is True
+    assert report["intrinsic_flux_jy_at_ref"] == pytest.approx(64 * 64)
+    expected_att = float(np.sum(beam.power_response(sep, 700e6)))
+    assert report["attenuated_flux_jy_at_ref"] == pytest.approx(expected_att, 1e-5)
+    assert report["beam_power_fwhm_deg_at_ref"] == pytest.approx(
+        beam.power_fwhm_deg(700e6)
+    )
+
+
+def test_static_stokes_without_beam_is_unattenuated(tmp_path, monkeypatch):
+    """Direct API callers that pass no beam get the intrinsic sky, flagged."""
+    image_path = _write_static_stokes_image(tmp_path, shape=(64, 64))
+    cfg = _static_stokes_cfg(image_path, tmp_path)
+    ctx = create_run_context(cfg)
+    monkeypatch.setattr(
+        "skasim.loaders.wsclean_predict.run_wsclean_predict", lambda **kwargs: None
+    )
+
+    report = inject_static_stokes_i_with_wsclean_predict(
+        ctx, cfg.models[0], 0, Path("fake.ms"), cfg.imaging[0]
+    )
+
+    with fits.open(report["model_paths"][0]) as hdul:
+        np.testing.assert_allclose(np.asarray(hdul[0].data), 1.0)
+    assert report["primary_beam_applied"] is False
+
+
+def test_inject_image_models_forwards_beam_and_phase_center(tmp_path, monkeypatch):
+    """The façade passes the run beam and phase centre to every injector."""
+    from astropy.coordinates import SkyCoord
+
+    from skasim.primary_beam import GaussianStationBeam
+
+    image_path = _write_static_stokes_image(tmp_path, shape=(64, 64))
+    cfg = _static_stokes_cfg(image_path, tmp_path)
+    ctx = create_run_context(cfg)
+    seen = {}
+
+    def fake_inject(ctx_arg, entry, index, visibility_path, img_config, **kwargs):
+        seen.update(kwargs)
+        return {"model_paths": []}
+
+    monkeypatch.setattr(
+        "skasim.loaders.wsclean_predict.inject_static_stokes_i_with_wsclean_predict",
+        fake_inject,
+    )
+    monkeypatch.setattr(
+        "skasim.loaders.image_models.merge_model_data_into_data", lambda path: None
+    )
+    beam = GaussianStationBeam(field_fwhm_deg=0.1, ref_freq_hz=700e6)
+    centre = SkyCoord(10.0, 2.0, unit="deg")
+
+    inject_image_models(ctx, Path("fake.ms"), phase_center=centre, beam=beam)
+
+    assert seen == {"phase_center": centre, "beam": beam}
+
+
+def test_inject_image_models_forwards_beam_and_phase_center_to_cubes(
+    tmp_path, monkeypatch
+):
+    """Cubes receive the run beam and phase centre like the other images."""
+    from astropy.coordinates import SkyCoord
+
+    from skasim.primary_beam import GaussianStationBeam
+
+    cube_path = _write_spectral_cube(tmp_path, n_channels=8, pixels=64, freq_mhz=700.0)
+    cfg = SimConfig(
+        output_dir=str(tmp_path / "run"),
+        models=[{"type": "spectral_cube", "cube": str(cube_path)}],
+        observation=ObsConfig(
+            frequency_mhz=700.0, bandwidth_mhz=100.0, n_channels=8, observation_time_s=1
+        ),
+        imaging=[ImgConfig(pixels=64, imager="wsclean")],
+    )
+    ctx = create_run_context(cfg)
+    seen = {}
+
+    def fake_inject(ctx_arg, entry, index, vis, img, cube, header, axis, **kwargs):
+        seen.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(
+        "skasim.loaders.wsclean_predict.inject_spectral_cube_with_wsclean_predict",
+        fake_inject,
+    )
+    monkeypatch.setattr(
+        "skasim.loaders.image_models.merge_model_data_into_data", lambda path: None
+    )
+    beam = GaussianStationBeam(field_fwhm_deg=0.1, ref_freq_hz=700e6)
+    centre = SkyCoord(10.0, 2.0, unit="deg")
+
+    inject_image_models(ctx, Path("fake.ms"), phase_center=centre, beam=beam)
+
+    assert seen == {"phase_center": centre, "beam": beam}

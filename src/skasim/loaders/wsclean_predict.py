@@ -11,14 +11,24 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+import time
 from pathlib import Path
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import astropy.units as u
 import numpy as np
 from astropy.io import fits
+from astropy.wcs import WCS
+from astropy.wcs.utils import proj_plane_pixel_scales
 from loguru import logger
 
 from ..config import ImgConfig
+from ..primary_beam import angular_separation_deg, pixel_to_icrs_deg
+
+if TYPE_CHECKING:
+    from astropy.coordinates import SkyCoord
+
+    from ..primary_beam import GaussianStationBeam
 
 
 def write_per_channel_model_fits(
@@ -135,6 +145,305 @@ def _imaging_cellsize(
     return fov / pixels
 
 
+# Maximum tolerated difference, in model pixels, between where the model FITS
+# WCS puts a pixel and where WSClean predicts it. WSClean applies the same 0.1
+# pixel tolerance to pixel-scale mismatches between -scale and the FITS header.
+PLACEMENT_TOLERANCE_PIX = 0.1
+
+# Smallest model grid skasim hands to ``wsclean -predict``. WSClean 3.5
+# crashes (free(): invalid pointer, corrupted double-linked list) or hangs on
+# predict grids of 6-16 pixels; 24 and 32 work. Smaller models are padded with
+# zeros by regridding onto a grid of at least this size.
+MIN_PREDICT_PIXELS = 32
+
+# Offsets below this fraction of a pixel are treated as "already centred".
+_SHIFT_EPSILON_PIX = 1e-6
+
+
+def format_wsclean_shift(position: "SkyCoord") -> Tuple[str, str]:
+    """Format a position for ``wsclean -shift`` (aocommon ``RaDecCoord`` syntax).
+
+    WSClean parses ``HHhMMmSS.Ss`` and ``±DDdMMmSS.Ss``; the sign is taken from
+    a leading ``-``, so declinations in (-1, 0) degrees keep their sign.
+    """
+    icrs = position.icrs
+    ra = icrs.ra.to_string(unit=u.hour, sep="hms", precision=8, pad=True)
+    dec = icrs.dec.to_string(unit=u.deg, sep="dms", precision=7, pad=True)
+    return ra, dec
+
+
+def _wsclean_implied_wcs(
+    phase_center: "SkyCoord",
+    shift: "SkyCoord",
+    n_pixels: int,
+    pixel_size_deg: float,
+) -> WCS:
+    """Return the WCS WSClean assigns to a predict model image.
+
+    Transcribed from aocommon ``FitsWriter``: a SIN projection tangent at the
+    phase centre, ``CDELT = (-d, d)`` and
+    ``CRPIX = (N/2 + 1 + l/d, N/2 + 1 - m/d)`` with ``(l, m)`` the direction
+    cosines of the ``-shift`` position (``ImageCoordinates::RaDecToLM``).
+    """
+    pc = phase_center.icrs
+    ra0, dec0 = pc.ra.rad, pc.dec.rad
+    ra, dec = shift.icrs.ra.rad, shift.icrs.dec.rad
+    dra = ra - ra0
+    l_shift = np.cos(dec) * np.sin(dra)
+    m_shift = np.sin(dec) * np.cos(dec0) - np.cos(dec) * np.sin(dec0) * np.cos(dra)
+    d_rad = np.radians(pixel_size_deg)
+
+    wcs = WCS(naxis=2)
+    wcs.wcs.ctype = ["RA---SIN", "DEC--SIN"]
+    wcs.wcs.crval = [pc.ra.deg, pc.dec.deg]
+    wcs.wcs.cdelt = [-pixel_size_deg, pixel_size_deg]
+    wcs.wcs.crpix = [
+        n_pixels / 2.0 + 1.0 + l_shift / d_rad,
+        n_pixels / 2.0 + 1.0 - m_shift / d_rad,
+    ]
+    return wcs
+
+
+def _celestial_pixel_scales_deg(wcs: WCS) -> Tuple[float, float]:
+    # celestial WCS units are degrees (astropy normalises CUNIT)
+    scale_x, scale_y = (float(v) for v in np.abs(proj_plane_pixel_scales(wcs)))
+    return scale_x, scale_y
+
+
+def wsclean_predict_placement(
+    header: fits.Header, shape: tuple, phase_center: "SkyCoord"
+) -> dict:
+    """Decide whether WSClean can predict a model image directly via ``-shift``.
+
+    WSClean ignores the model's ``CRVAL``: it treats the image as a SIN
+    projection tangent at the phase centre whose centre pixel (1-based
+    ``N/2 + 1``) lies at the ``-shift`` position. skasim takes the model's own
+    world position of that pixel as the shift and compares the model WCS with
+    the WCS WSClean implies over the whole image.
+
+    Returns a record with ``direct_placement_ok``. Direct placement requires an
+    RA/Dec SIN projection, a square image with square pixels, and a maximum
+    placement error within :data:`PLACEMENT_TOLERANCE_PIX`; otherwise
+    ``reason`` says why, and the caller resamples (:func:`prepare_predict_grid`).
+    """
+    wcs = WCS(header).celestial
+    if wcs.naxis != 2:
+        raise ValueError("model image has no celestial WCS; cannot place it on sky")
+    ny, nx = int(shape[-2]), int(shape[-1])
+    scale_x, scale_y = _celestial_pixel_scales_deg(wcs)
+    centre = wcs.pixel_to_world((nx - 1) / 2.0, (ny - 1) / 2.0)
+    record = {
+        "model_centre_ra_deg": float(centre.icrs.ra.deg),
+        "model_centre_dec_deg": float(centre.icrs.dec.deg),
+        "offset_arcsec": float(centre.separation(phase_center).arcsec),
+        "direct_placement_ok": False,
+        "direct_placement_error_pix": None,
+        "placement_tolerance_pix": PLACEMENT_TOLERANCE_PIX,
+        "reason": None,
+    }
+
+    ctypes = [str(c).upper() for c in wcs.wcs.ctype]
+    if not (ctypes[0].startswith("RA---SIN") and ctypes[1].startswith("DEC--SIN")):
+        record["reason"] = f"projection {ctypes} is not RA/Dec SIN"
+        return record
+    if nx != ny:
+        record["reason"] = f"image is not square ({nx}x{ny} pixels)"
+        return record
+    if not np.isclose(scale_x, scale_y, rtol=1e-6, atol=0.0):
+        record["reason"] = (
+            f"pixels are not square ({scale_x * 3600:.6g} x "
+            f"{scale_y * 3600:.6g} arcsec)"
+        )
+        return record
+
+    if nx < MIN_PREDICT_PIXELS:
+        record["reason"] = (
+            f"image ({nx}x{ny} pixels) is smaller than the minimum WSClean "
+            f"predict grid of {MIN_PREDICT_PIXELS} pixels"
+        )
+        return record
+
+    pixel_size_deg = scale_x
+    n_pixels = nx
+    centre_pix = n_pixels / 2.0  # 0-based index of WSClean's centre pixel
+    shift = wcs.pixel_to_world(centre_pix, centre_pix)
+    implied = _wsclean_implied_wcs(phase_center, shift, n_pixels, pixel_size_deg)
+    samples = np.linspace(0.0, n_pixels - 1.0, 9)
+    xx, yy = np.meshgrid(samples, samples)
+    model_ra, model_dec = wcs.all_pix2world(xx, yy, 0)
+    wsc_ra, wsc_dec = implied.all_pix2world(xx, yy, 0)
+    error_deg = angular_separation_deg(model_ra, model_dec, wsc_ra, wsc_dec)
+    error_pix = float(np.nanmax(error_deg) / pixel_size_deg)
+    record["direct_placement_error_pix"] = error_pix
+    if not np.isfinite(error_pix) or error_pix > PLACEMENT_TOLERANCE_PIX:
+        record["reason"] = (
+            f"maximum placement error {error_pix:.3g} pixels exceeds "
+            f"{PLACEMENT_TOLERANCE_PIX} pixels (tangent point or orientation "
+            "differs from the grid WSClean assumes)"
+        )
+        return record
+
+    record["direct_placement_ok"] = True
+    record.update(
+        _shift_record(shift, phase_center, pixel_size_deg),
+        n_pixels=n_pixels,
+        pixel_size_arcsec=pixel_size_deg * 3600.0,
+        placement_error_pix=error_pix,
+    )
+    return record
+
+
+def _shift_record(
+    shift: "SkyCoord", phase_center: "SkyCoord", pixel_size_deg: float
+) -> dict:
+    offset_deg = float(shift.separation(phase_center).deg)
+    applied = offset_deg > _SHIFT_EPSILON_PIX * pixel_size_deg
+    ra_text, dec_text = format_wsclean_shift(shift)
+    return {
+        "shift_applied": bool(applied),
+        "shift_ra_deg": float(shift.icrs.ra.deg),
+        "shift_dec_deg": float(shift.icrs.dec.deg),
+        "shift_wsclean": [ra_text, dec_text] if applied else None,
+    }
+
+
+def _resampled_grid(
+    wcs_in: WCS, shape: tuple, phase_center: "SkyCoord"
+) -> Tuple[WCS, int, float, "SkyCoord"]:
+    """Return the WSClean-native grid covering the model footprint.
+
+    The pixel size is the geometric mean of the input pixel scales; the grid is
+    even-sized, centred on the model centre, tangent at the phase centre, and
+    at least :data:`MIN_PREDICT_PIXELS` wide (zero-padded around small models).
+    """
+    ny, nx = int(shape[-2]), int(shape[-1])
+    scale_x, scale_y = _celestial_pixel_scales_deg(wcs_in)
+    pixel_size_deg = float(np.sqrt(scale_x * scale_y))
+    # Centre the grid on a pixel corner of the input. For odd sizes the
+    # geometric centre is a pixel centre, which aligns output and input pixel
+    # edges; reproject_exact's polygon clipping then loses flux (measured
+    # ~6e-4 for a single pixel), so move half a pixel off it.
+    centre = wcs_in.pixel_to_world(
+        (nx - 1) / 2.0 + 0.5 * (nx % 2), (ny - 1) / 2.0 + 0.5 * (ny % 2)
+    )
+
+    # Probe a grid with the centre pixel on the model centre, then size it so
+    # the model's pixel-edge footprint fits with a one-pixel margin.
+    probe = _wsclean_implied_wcs(phase_center, centre, 2, pixel_size_deg)
+    edge_x = np.array([-0.5, nx - 0.5, nx - 0.5, -0.5])
+    edge_y = np.array([-0.5, -0.5, ny - 0.5, ny - 0.5])
+    ra, dec = pixel_to_icrs_deg(wcs_in, edge_x, edge_y)
+    px, py = probe.all_world2pix(ra, dec, 0)
+    centre_px = 1.0  # 0-based N/2 for the N=2 probe
+    half_extent = float(np.max(np.abs(np.concatenate([px, py]) - centre_px)))
+    n_pixels = max(2 * int(np.ceil(half_extent + 1.0)), MIN_PREDICT_PIXELS)
+    target = _wsclean_implied_wcs(phase_center, centre, n_pixels, pixel_size_deg)
+    return target, n_pixels, pixel_size_deg, centre
+
+
+def _pixel_solid_angle_sr(wcs: WCS, shape: tuple) -> np.ndarray:
+    """Per-pixel solid angle of a celestial grid (steradian).
+
+    Projected pixel area divided by ``n = cos(theta)`` from the tangent point,
+    exact for SIN and the leading-order correction for other zenithal
+    projections near their reference point.
+    """
+    scale_x, scale_y = _celestial_pixel_scales_deg(wcs)
+    plane_area = float(np.radians(scale_x) * np.radians(scale_y))
+    ny, nx = int(shape[-2]), int(shape[-1])
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    ra, dec = wcs.all_pix2world(xx, yy, 0)
+    theta = angular_separation_deg(ra, dec, wcs.wcs.crval[0], wcs.wcs.crval[1])
+    return plane_area / np.cos(np.radians(theta))
+
+
+def prepare_predict_grid(
+    planes: "list[np.ndarray]",
+    header: fits.Header,
+    phase_center: "SkyCoord",
+) -> Tuple["list[np.ndarray]", fits.Header, dict]:
+    """Put 2D Jy/pixel model planes on a grid WSClean predicts correctly.
+
+    Planes that WSClean can place directly (see
+    :func:`wsclean_predict_placement`) are returned unchanged. Otherwise every
+    plane is regridded with ``reproject_exact`` onto a SIN grid tangent at the
+    phase centre, with the WSClean centre-pixel convention. Flux is conserved
+    by converting Jy/pixel to surface brightness and back with the input and
+    output pixel solid angles. Returns ``(planes, header, placement)``.
+    """
+    shape = planes[0].shape
+    placement = wsclean_predict_placement(header, shape, phase_center)
+    if placement["direct_placement_ok"]:
+        placement["resampled"] = False
+        return planes, header, placement
+
+    try:
+        from reproject import reproject_exact
+    except ImportError as exc:  # pragma: no cover - declared dependency
+        raise RuntimeError(
+            "reproject is required to regrid image models for WSClean predict "
+            f"({placement['reason']})."
+        ) from exc
+
+    wcs_in = WCS(header).celestial
+    target, n_pixels, pixel_size_deg, centre = _resampled_grid(
+        wcs_in, shape, phase_center
+    )
+    omega_in = _pixel_solid_angle_sr(wcs_in, shape)
+    omega_out = _pixel_solid_angle_sr(target, (n_pixels, n_pixels))
+    out_planes = []
+    for plane in planes:
+        # Jy/pixel -> Jy/sr; reproject_exact then returns the overlap-weighted
+        # mean surface brightness and the covered fraction of each output
+        # pixel, whose product times the output solid angle conserves flux,
+        # including partly covered edge pixels.
+        surface_brightness = np.asarray(plane, dtype=float) / omega_in
+        regridded, coverage = reproject_exact(
+            (surface_brightness, wcs_in),
+            target,
+            shape_out=(n_pixels, n_pixels),
+        )
+        out_planes.append(np.nan_to_num(regridded * coverage, nan=0.0) * omega_out)
+
+    flux_in = float(np.nansum(planes[0]))
+    flux_out = float(np.sum(out_planes[0]))
+    if flux_in != 0.0 and abs(flux_out - flux_in) > 1e-3 * abs(flux_in):
+        logger.warning(
+            "regridded model flux differs from the input by {:.3g}% "
+            "({:.6g} -> {:.6g} Jy).",
+            100.0 * (flux_out - flux_in) / flux_in,
+            flux_in,
+            flux_out,
+        )
+
+    out_header = header.copy()
+    for key in list(out_header.keys()):
+        if key[:5] in ("CTYPE", "CRPIX", "CRVAL", "CDELT", "CUNIT", "CROTA") and (
+            key[5:] in ("1", "2")
+        ):
+            del out_header[key]
+        elif key[:2] in ("PC", "CD") and key[2:] in ("1_1", "1_2", "2_1", "2_2"):
+            del out_header[key]
+    out_header.update(target.to_header())
+    out_header["NAXIS1"] = n_pixels
+    out_header["NAXIS2"] = n_pixels
+    out_header["HISTORY"] = (
+        "regridded by skasim onto the WSClean predict grid (reproject_exact)"
+    )
+
+    placement.update(
+        resampled=True,
+        resample_method="reproject_exact",
+        flux_before_jy=flux_in,
+        flux_after_jy=flux_out,
+        n_pixels=n_pixels,
+        pixel_size_arcsec=pixel_size_deg * 3600.0,
+        placement_error_pix=0.0,
+        **_shift_record(centre, phase_center, pixel_size_deg),
+    )
+    return out_planes, out_header, placement
+
+
 def build_wsclean_predict_argv(
     wsclean_command: str,
     visibility_path: Path,
@@ -143,6 +452,7 @@ def build_wsclean_predict_argv(
     n_channels: int,
     pixel_size_arcsec: float | None = None,
     n_pixels: int | None = None,
+    shift: Optional[Tuple[str, str]] = None,
 ) -> list[str]:
     """Build argv for ``wsclean -predict``.
 
@@ -156,6 +466,9 @@ def build_wsclean_predict_argv(
     image geometry (e.g. spectral-cube predict) should pass them explicitly so
     that the predict image size matches the model images regardless of any
     auto-derived imaging geometry.
+
+    ``shift`` is an ``(ra, dec)`` pair already formatted for ``-shift`` (see
+    :func:`format_wsclean_shift`).
     """
     if pixel_size_arcsec is None or n_pixels is None:
         pixel_size_arcsec = img_config.cell_size_arcsec
@@ -165,6 +478,12 @@ def build_wsclean_predict_argv(
             )
             pixel_size_arcsec = imaging_cellsize.to(u.arcsec).value
         n_pixels = img_config.pixels
+    if n_pixels < MIN_PREDICT_PIXELS:
+        raise ValueError(
+            f"WSClean predict grid of {n_pixels} pixels is too small: WSClean "
+            f"crashes or hangs on small grids; use at least {MIN_PREDICT_PIXELS} "
+            "pixels."
+        )
 
     # Keep only the executable from the supplied command line; imaging flags
     # are not applicable to ``wsclean -predict`` and make it fail.
@@ -187,6 +506,8 @@ def build_wsclean_predict_argv(
         "-name",
         prefix,
     ]
+    if shift is not None:
+        argv += ["-shift", shift[0], shift[1]]
     if img_config.threads is not None:
         argv += ["-j", str(img_config.threads)]
     argv.append(str(visibility_path))
@@ -202,6 +523,7 @@ def run_wsclean_predict(
     work_dir: Path,
     pixel_size_arcsec: float | None = None,
     n_pixels: int | None = None,
+    shift: Optional[Tuple[str, str]] = None,
 ) -> None:
     """Run WSClean in predict mode to fill MODEL_DATA of the MS."""
     argv = build_wsclean_predict_argv(
@@ -212,6 +534,7 @@ def run_wsclean_predict(
         n_channels,
         pixel_size_arcsec=pixel_size_arcsec,
         n_pixels=n_pixels,
+        shift=shift,
     )
     logger.info(f"WSClean predict command: {argv}")
 
@@ -245,6 +568,119 @@ def run_wsclean_predict(
         )
 
 
+def pixel_separation_deg(
+    header: fits.Header, shape: tuple, phase_center: "SkyCoord"
+) -> np.ndarray:
+    """Return each pixel's angular distance from ``phase_center`` (degrees).
+
+    ``shape`` is the NumPy ``(ny, nx)`` spatial shape; the FITS celestial WCS is
+    evaluated with 0-based pixel indices (FITS axis 1 is NumPy's last axis).
+    """
+    wcs = WCS(header).celestial
+    ny, nx = int(shape[-2]), int(shape[-1])
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    ra, dec = pixel_to_icrs_deg(wcs, xx, yy)
+    icrs = phase_center.icrs
+    return angular_separation_deg(ra, dec, icrs.ra.deg, icrs.dec.deg)
+
+
+def _beam_flux_report(
+    ref_plane: np.ndarray,
+    separation_deg: Optional[np.ndarray],
+    beam: "Optional[GaussianStationBeam]",
+    ref_freq_hz: float,
+) -> dict:
+    """Summarise intrinsic and beam-attenuated flux at the band centre."""
+    intrinsic = float(np.nansum(ref_plane))
+    if beam is None or separation_deg is None:
+        return {
+            "primary_beam_applied": False,
+            "intrinsic_flux_jy_at_ref": intrinsic,
+            "attenuated_flux_jy_at_ref": intrinsic,
+        }
+    attenuated = float(
+        np.nansum(ref_plane * beam.power_response(separation_deg, ref_freq_hz))
+    )
+    return {
+        "primary_beam_applied": True,
+        "intrinsic_flux_jy_at_ref": intrinsic,
+        "attenuated_flux_jy_at_ref": attenuated,
+        "beam_power_fwhm_deg_at_ref": beam.power_fwhm_deg(ref_freq_hz),
+        "beam_ref_freq_hz": ref_freq_hz,
+    }
+
+
+def _prepare_sky_placement(
+    planes: "list[np.ndarray]",
+    header: fits.Header,
+    phase_center: "Optional[SkyCoord]",
+    beam: "Optional[GaussianStationBeam]",
+    label: str,
+) -> Tuple["list[np.ndarray]", fits.Header, Optional[np.ndarray], Optional[dict]]:
+    """Place model planes on sky and return ``(planes, header, sep, placement)``.
+
+    With a phase centre, the planes are put on a grid WSClean predicts at the
+    position given by their FITS WCS (directly through ``-shift``, or after
+    regridding; see :func:`prepare_predict_grid`) and per-pixel separations
+    from the phase centre are returned for the primary beam. Without a phase
+    centre (direct API callers) the legacy behaviour applies: the image is
+    predicted centred on the MS phase centre, unattenuated.
+    """
+    if phase_center is None:
+        if beam is not None:
+            raise ValueError(
+                f"{label}: a phase centre is required to apply the primary beam."
+            )
+        logger.warning(
+            "{}: no phase centre supplied; the model is predicted centred on the "
+            "MS phase centre and without primary-beam attenuation.",
+            label,
+        )
+        return planes, header, None, None
+    planes, header, placement = prepare_predict_grid(planes, header, phase_center)
+    if placement["resampled"]:
+        logger.info(
+            "{}: regridded onto the WSClean predict grid ({}); {} px at {:.4g} "
+            "arcsec, flux {:.6g} -> {:.6g} Jy.",
+            label,
+            placement["reason"],
+            placement["n_pixels"],
+            placement["pixel_size_arcsec"],
+            placement["flux_before_jy"],
+            placement["flux_after_jy"],
+        )
+    if placement["shift_applied"]:
+        logger.info(
+            "{}: model centre is {:.3f} arcsec from the phase centre; WSClean "
+            "-shift {} {}.",
+            label,
+            placement["offset_arcsec"],
+            *placement["shift_wsclean"],
+        )
+    separation = None
+    if beam is None:
+        logger.warning(
+            "{}: no primary beam supplied; the model is predicted unattenuated.",
+            label,
+        )
+    else:
+        separation = pixel_separation_deg(header, planes[0].shape, phase_center)
+    return planes, header, separation, placement
+
+
+def _shift_arg(placement: Optional[dict]) -> Optional[Tuple[str, str]]:
+    if placement is None or not placement["shift_applied"]:
+        return None
+    ra_text, dec_text = placement["shift_wsclean"]
+    return ra_text, dec_text
+
+
+def _placement_report(placement: Optional[dict]) -> dict:
+    if placement is None:
+        return {"wcs_placement": "phase_centre_assumed"}
+    return {"wcs_placement": "fits_wcs", **placement}
+
+
 def merge_model_data_into_data(visibility_path: Path) -> None:
     """Add image-model MODEL_DATA into the delivered DATA column.
 
@@ -258,6 +694,193 @@ def merge_model_data_into_data(visibility_path: Path) -> None:
     return _canonical_merge(visibility_path)
 
 
+def _emission_crop(cube: np.ndarray) -> Optional[dict]:
+    """Return the channels and spatial box holding non-zero emission.
+
+    ``cube`` is ``(freq, y, x)``. Returns ``None`` for an all-zero cube,
+    otherwise ``{"channels": [...], "y": (y0, y1), "x": (x0, x1)}`` with
+    half-open pixel ranges covering the union of every channel's emission.
+    """
+    nonzero = np.asarray(cube) != 0
+    channel_mask = nonzero.any(axis=(1, 2))
+    if not channel_mask.any():
+        return None
+    spatial = nonzero.any(axis=0)
+    rows = np.flatnonzero(spatial.any(axis=1))
+    cols = np.flatnonzero(spatial.any(axis=0))
+    return {
+        "channels": [int(i) for i in np.flatnonzero(channel_mask)],
+        "y": (int(rows[0]), int(rows[-1]) + 1),
+        "x": (int(cols[0]), int(cols[-1]) + 1),
+    }
+
+
+def _crop_header(header: fits.Header, x0: int, y0: int) -> fits.Header:
+    """Shift the celestial reference pixel for a crop starting at ``(x0, y0)``."""
+    out = header.copy()
+    out["CRPIX1"] = float(out.get("CRPIX1", 1.0)) - x0
+    out["CRPIX2"] = float(out.get("CRPIX2", 1.0)) - y0
+    return out
+
+
+def place_spectral_cube(
+    cube: np.ndarray,
+    header: fits.Header,
+    freqs_hz: np.ndarray,
+    phase_center: "Optional[SkyCoord]",
+    beam: "Optional[GaussianStationBeam]",
+    label: str,
+) -> Tuple[np.ndarray, fits.Header, dict]:
+    """Place a ``(freq, y, x)`` Jy/pixel cube on sky and apply the primary beam.
+
+    Same rules as the 2D image models: direct ``-shift`` placement when the
+    cube's grid matches WSClean's, otherwise flux-conserving regridding. When
+    regridding, only channels with emission are regridded, each cropped to the
+    spatial box holding the emission of all channels; empty channels stay
+    empty, so the result equals regridding every channel. Each channel is then
+    multiplied by the shared power beam at its own frequency.
+
+    Returns ``(cube, header, report)``; ``report`` holds the placement, the
+    crop and the regridding time.
+    """
+    cube = np.asarray(cube, dtype=np.float32)
+    crop = _emission_crop(cube)
+    if crop is None:
+        raise ValueError(
+            f"{label}: the cube has no non-zero pixels on the observation's "
+            "channel grid; nothing to predict."
+        )
+    report: dict = {
+        "line_channels": [crop["channels"][0], crop["channels"][-1]],
+        "n_line_channels": len(crop["channels"]),
+    }
+    if phase_center is None:
+        if beam is not None:
+            raise ValueError(
+                f"{label}: a phase centre is required to apply the primary beam."
+            )
+        logger.warning(
+            "{}: no phase centre supplied; the cube is predicted centred on the "
+            "MS phase centre and without primary-beam attenuation.",
+            label,
+        )
+        report.update(_placement_report(None), primary_beam_applied=False)
+        return cube, header, report
+
+    placement = wsclean_predict_placement(header, cube.shape[1:], phase_center)
+    if placement["direct_placement_ok"]:
+        placement["resampled"] = False
+        out_cube, out_header = cube, header
+    else:
+        (y0, y1), (x0, x1) = crop["y"], crop["x"]
+        planes = [cube[i, y0:y1, x0:x1] for i in crop["channels"]]
+        cropped_header = _crop_header(header, x0, y0)
+        started = time.perf_counter()
+        regridded, out_header, placement = prepare_predict_grid(
+            planes, cropped_header, phase_center
+        )
+        elapsed = time.perf_counter() - started
+        n_out = int(placement["n_pixels"])
+        out_cube = np.zeros((cube.shape[0], n_out, n_out), dtype=np.float32)
+        for channel, plane in zip(crop["channels"], regridded):
+            out_cube[channel] = plane
+        flux_in = float(np.sum(cube, dtype=float))
+        flux_out = float(np.sum(out_cube, dtype=float))
+        placement.update(
+            flux_before_jy=flux_in,
+            flux_after_jy=flux_out,
+            regrid_crop={"x": list(crop["x"]), "y": list(crop["y"])},
+            regrid_n_channels=len(crop["channels"]),
+            regrid_elapsed_s=elapsed,
+        )
+        logger.info(
+            "{}: regridded {} of {} channels ({}x{} px crop) onto the WSClean "
+            "predict grid in {:.1f} s; summed flux {:.6g} -> {:.6g} Jy.",
+            label,
+            len(crop["channels"]),
+            cube.shape[0],
+            x1 - x0,
+            y1 - y0,
+            elapsed,
+            flux_in,
+            flux_out,
+        )
+    if placement["shift_applied"]:
+        logger.info(
+            "{}: cube centre is {:.3f} arcsec from the phase centre; WSClean "
+            "-shift {} {}.",
+            label,
+            placement["offset_arcsec"],
+            *placement["shift_wsclean"],
+        )
+    report.update(_placement_report(placement))
+
+    if beam is None:
+        logger.warning(
+            "{}: no primary beam supplied; the cube is predicted unattenuated.",
+            label,
+        )
+        report["primary_beam_applied"] = False
+        return out_cube, out_header, report
+
+    separation = pixel_separation_deg(out_header, out_cube.shape[1:], phase_center)
+    out_cube = out_cube.copy() if out_cube is cube else out_cube
+    for channel in crop["channels"]:
+        response = beam.power_response(separation, float(freqs_hz[channel]))
+        out_cube[channel] *= response.astype(np.float32)
+    report.update(
+        primary_beam_applied=True,
+        beam_power_fwhm_deg_at_ref=beam.power_fwhm_deg(beam.ref_freq_hz),
+        beam_ref_freq_hz=beam.ref_freq_hz,
+    )
+    return out_cube, out_header, report
+
+
+SPEED_OF_LIGHT_KM_S = 299792.458
+
+
+def line_flux_report(
+    cube_in: np.ndarray,
+    cube_out: np.ndarray,
+    freqs_hz: np.ndarray,
+    line_channels: "list[int]",
+    restfrq_hz: Optional[float],
+) -> dict:
+    """Integrated line flux of a Jy/pixel cube, before and after the beam.
+
+    The flux is summed over pixels and channels times the channel width:
+    Jy km/s (radio convention, ``dv = c * dnu / RESTFRQ``) when a rest
+    frequency is known, otherwise Jy MHz. ``line_channels`` is the first and
+    last channel with emission (MS channel indices).
+    """
+    width_hz = abs(float(freqs_hz[1] - freqs_hz[0])) if len(freqs_hz) > 1 else 0.0
+    if restfrq_hz:
+        unit = "Jy km/s"
+        scale = SPEED_OF_LIGHT_KM_S * width_hz / float(restfrq_hz)
+    else:
+        unit = "Jy MHz"
+        scale = width_hz / 1e6
+    first, last = line_channels
+    return {
+        "line_flux_unit": unit,
+        "intrinsic_line_flux": float(np.sum(cube_in, dtype=float)) * scale,
+        "attenuated_line_flux": float(np.sum(cube_out, dtype=float)) * scale,
+        "line_frequency_range_hz": [float(freqs_hz[first]), float(freqs_hz[last])],
+        "channel_width_hz": width_hz,
+        "rest_frequency_hz": float(restfrq_hz) if restfrq_hz else None,
+    }
+
+
+def _channel_frequencies_hz(header: fits.Header, freq_axis: int, n: int) -> np.ndarray:
+    crpix = float(header.get(f"CRPIX{freq_axis}", 1.0))
+    crval = float(header[f"CRVAL{freq_axis}"])
+    cdelt = float(header[f"CDELT{freq_axis}"])
+    if str(header.get(f"CUNIT{freq_axis}") or "").strip().lower() == "mhz":
+        crval *= 1e6
+        cdelt *= 1e6
+    return crval + (np.arange(n) - (crpix - 1.0)) * cdelt
+
+
 def inject_spectral_cube_with_wsclean_predict(
     ctx,
     entry,
@@ -267,38 +890,55 @@ def inject_spectral_cube_with_wsclean_predict(
     cube_data: np.ndarray,
     header: fits.Header,
     freq_axis: int,
+    phase_center: "Optional[SkyCoord]" = None,
+    beam: "Optional[GaussianStationBeam]" = None,
 ) -> dict:
-    """Write per-channel FITS and run ``wsclean -predict`` for a spectral cube."""
+    """Place a spectral cube, apply the beam, and run ``wsclean -predict``.
+
+    ``cube_data`` is ``(freq, y, x)`` on the MS channel grid (see
+    ``prepare_spectral_cube_for_casa``). With ``phase_center`` the cube lands
+    at its FITS WCS position and, with ``beam``, every channel is attenuated by
+    the shared power beam at its frequency (see :func:`place_spectral_cube`).
+    """
     prefix = f"model_entry_{index + 1:02d}_spectral_cube"
     model_dir = ctx.work_dir / f"{prefix}_predict_models"
+    label = f"spectral_cube entry {index + 1}"
 
+    freqs_hz = _channel_frequencies_hz(header, freq_axis, cube_data.shape[0])
+    restfrq = header.get("RESTFRQ", header.get("RESTFREQ"))
+    cube, header, placement_report = place_spectral_cube(
+        cube_data, header, freqs_hz, phase_center, beam, label
+    )
+    placement_report.update(
+        line_flux_report(
+            cube_data, cube, freqs_hz, placement_report["line_channels"], restfrq
+        )
+    )
     model_paths = write_per_channel_model_fits(
-        cube_data, header, model_dir, prefix, freq_axis=freq_axis
+        cube, header, model_dir, prefix, freq_axis=freq_axis
     )
 
-    # Use the cube's own spatial geometry for predict; this keeps spectral-cube
-    # models valid even when the imaging geometry was auto-derived from fov_deg.
-    n_pixels = max(int(header["NAXIS1"]), int(header["NAXIS2"]))
-    cdelt1 = float(header["CDELT1"])
-    cunit1 = str(header.get("CUNIT1") or "").strip().lower()
-    if cunit1 == "deg":
-        pixel_size_arcsec = abs(cdelt1) * 3600.0
-    elif cunit1 in {"asec", "arcsec"}:
-        pixel_size_arcsec = abs(cdelt1)
-    elif cunit1 == "rad":
-        pixel_size_arcsec = abs(np.degrees(cdelt1)) * 3600.0
-    else:
-        raise ValueError(f"unsupported CUNIT1={cunit1!r} for spectral-cube predict")
+    ny, nx = cube.shape[1:]
+    if ny != nx:
+        raise ValueError(
+            f"{label}: WSClean predicts square images only; got {nx}x{ny} pixels "
+            "(supply a square cube, or a WCS that needs regridding)."
+        )
+    scale_x, _ = _celestial_pixel_scales_deg(WCS(header).celestial)
+    pixel_size_arcsec = scale_x * 3600.0
 
     run_wsclean_predict(
         wsclean_command=img_config.wsclean_command,
         visibility_path=visibility_path,
         img_config=img_config,
         prefix=prefix,
-        n_channels=cube_data.shape[0],
+        n_channels=cube.shape[0],
         work_dir=model_dir,
         pixel_size_arcsec=pixel_size_arcsec,
-        n_pixels=n_pixels,
+        n_pixels=int(nx),
+        shift=_shift_arg(
+            placement_report if "shift_applied" in placement_report else None
+        ),
     )
 
     return {
@@ -308,6 +948,9 @@ def inject_spectral_cube_with_wsclean_predict(
         "n_channels": len(model_paths),
         "prefix": prefix,
         "model_dir": str(model_dir),
+        "n_pixels": int(nx),
+        "pixel_size_arcsec": pixel_size_arcsec,
+        **placement_report,
     }
 
 
@@ -317,6 +960,8 @@ def inject_static_stokes_i_with_wsclean_predict(
     index: int,
     visibility_path: Path,
     img_config: ImgConfig,
+    phase_center: "Optional[SkyCoord]" = None,
+    beam: "Optional[GaussianStationBeam]" = None,
 ) -> dict:
     """Inject a static Stokes I model using ``wsclean -predict``.
 
@@ -325,6 +970,11 @@ def inject_static_stokes_i_with_wsclean_predict(
     convention. Each channel is a spectrally-flat copy of the input image with
     frequency metadata taken from the observation spectral window.
     ``wsclean -predict`` then fills the MODEL_DATA column of the MS.
+
+    When ``beam`` is given, every channel plane is multiplied by the shared
+    Gaussian power beam centred on ``phase_center`` (see
+    ``skasim.primary_beam``) so image models and catalogue sources share one
+    attenuation.
     """
     prefix = f"model_entry_{index + 1:02d}_static_stokes"
     model_dir = ctx.work_dir / f"{prefix}_models"
@@ -340,6 +990,9 @@ def inject_static_stokes_i_with_wsclean_predict(
         raise ValueError(
             f"static_stokes_maps stokes_i must be 2D; got shape {data.shape}"
         )
+    (data,), header_template, separation, placement = _prepare_sky_placement(
+        [data], header_template, phase_center, beam, "static_stokes_maps"
+    )
 
     cdelt1 = abs(float(header_template.get("CDELT1", 0.0)))
     cdelt2 = abs(float(header_template.get("CDELT2", 0.0)))
@@ -405,8 +1058,12 @@ def inject_static_stokes_i_with_wsclean_predict(
         hdr["CUNIT3"] = "Hz"
         hdr["BUNIT"] = header_template.get("BUNIT", "Jy/pixel")
 
+        plane = data
+        if beam is not None and separation is not None:
+            plane = data * beam.power_response(separation, freq_hz)
+
         path = model_dir / f"{prefix}-{i:04d}-model.fits"
-        fits.writeto(path, data[np.newaxis, :, :], hdr, overwrite=True)
+        fits.writeto(path, plane[np.newaxis, :, :], hdr, overwrite=True)
         model_paths.append(path)
 
     logger.info(
@@ -425,6 +1082,7 @@ def inject_static_stokes_i_with_wsclean_predict(
         work_dir=model_dir,
         pixel_size_arcsec=pixel_size_arcsec,
         n_pixels=n_pixels,
+        shift=_shift_arg(placement),
     )
 
     return {
@@ -438,6 +1096,8 @@ def inject_static_stokes_i_with_wsclean_predict(
         "pixel_size_arcsec": pixel_size_arcsec,
         "n_pixels": n_pixels,
         "wsclean_command": wsclean_command,
+        **_beam_flux_report(data, separation, beam, center_hz),
+        **_placement_report(placement),
     }
 
 
@@ -448,6 +1108,8 @@ def inject_continuum_i_alpha_with_wsclean_predict(
     visibility_path: Path,
     img_config: ImgConfig,
     product,
+    phase_center: "Optional[SkyCoord]" = None,
+    beam: "Optional[GaussianStationBeam]" = None,
 ) -> dict:
     """Inject a continuum I+alpha model using ``wsclean -predict``.
 
@@ -460,6 +1122,10 @@ def inject_continuum_i_alpha_with_wsclean_predict(
 
     where ν0 is the observation band centre.  ``wsclean -predict`` then fills
     the MODEL_DATA column of the visibility MS.
+
+    When ``beam`` is given, every channel plane is multiplied by the shared
+    Gaussian power beam centred on ``phase_center`` (see
+    ``skasim.primary_beam``).
     """
     if product.nterms != 2:
         raise ValueError(
@@ -498,6 +1164,15 @@ def inject_continuum_i_alpha_with_wsclean_predict(
         raise ValueError(
             f"tt0 and tt1 shapes differ: {tt0_data.shape} vs {tt1_data.shape}"
         )
+    (tt0_data, tt1_data), header_template, separation, placement = (
+        _prepare_sky_placement(
+            [tt0_data, tt1_data],
+            header_template,
+            phase_center,
+            beam,
+            "continuum_i_alpha",
+        )
+    )
 
     # Derive the pixel geometry from the model header so WSClean predict matches.
     cdelt1 = abs(float(header_template.get("CDELT1", 0.0)))
@@ -534,6 +1209,8 @@ def inject_continuum_i_alpha_with_wsclean_predict(
         # First-order Taylor expansion around the observation reference.
         relative = (freq_hz - center_hz) / center_hz
         plane = tt0_data + tt1_data * relative
+        if beam is not None and separation is not None:
+            plane = plane * beam.power_response(separation, freq_hz)
 
         hdr = header_template.copy()
         # Strip old NAXIS* keywords and rebuild a 3D single-plane header.
@@ -587,6 +1264,7 @@ def inject_continuum_i_alpha_with_wsclean_predict(
         work_dir=model_dir,
         pixel_size_arcsec=pixel_size_arcsec,
         n_pixels=n_pixels,
+        shift=_shift_arg(placement),
     )
 
     return {
@@ -599,15 +1277,25 @@ def inject_continuum_i_alpha_with_wsclean_predict(
         "pixel_size_arcsec": pixel_size_arcsec,
         "n_pixels": n_pixels,
         "wsclean_command": wsclean_command,
+        **_beam_flux_report(tt0_data, separation, beam, center_hz),
+        **_placement_report(placement),
     }
 
 
 __all__ = [
+    "MIN_PREDICT_PIXELS",
+    "PLACEMENT_TOLERANCE_PIX",
     "build_wsclean_predict_argv",
+    "format_wsclean_shift",
     "inject_continuum_i_alpha_with_wsclean_predict",
     "inject_static_stokes_i_with_wsclean_predict",
     "inject_spectral_cube_with_wsclean_predict",
+    "line_flux_report",
+    "place_spectral_cube",
     "merge_model_data_into_data",
+    "pixel_separation_deg",
+    "prepare_predict_grid",
     "run_wsclean_predict",
     "write_per_channel_model_fits",
+    "wsclean_predict_placement",
 ]

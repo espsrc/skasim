@@ -11,6 +11,7 @@ from skasim.config import (
     ObsConfig,
     SimConfig,
     SpectralCubeModelEntry,
+    resolve_spectral_mode,
 )
 
 # ---------------------------------------------------------------------------
@@ -339,6 +340,85 @@ def test_sim_config_rejects_removed_fields(kwargs):
         SimConfig(**kwargs)
 
 
+# ---------------------------------------------------------------------------
+# multimodal input: CASA ft entries are only valid on their own
+# ---------------------------------------------------------------------------
+
+
+def _continuum_entry(tmp_path, backend="wsclean_predict", name="m"):
+    stokes_i = tmp_path / f"{name}_i.fits"
+    alpha = tmp_path / f"{name}_alpha.fits"
+    stokes_i.touch()
+    alpha.touch()
+    return {
+        "type": "continuum_i_alpha",
+        "stokes_i": str(stokes_i),
+        "alpha": str(alpha),
+        "reference_frequency_hz": 1.4e9,
+        "injection_backend": backend,
+    }
+
+
+def _taylor_entry(tmp_path):
+    tt0 = tmp_path / "model.tt0"
+    tt0.mkdir(exist_ok=True)
+    return {
+        "type": "casa_taylor_terms",
+        "tt0": str(tt0),
+        "reference_frequency_hz": 1.4e9,
+    }
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize("ft_kind", ["continuum_casa_ft", "casa_taylor_terms"])
+@pytest.mark.parametrize("partner", ["catalog", "wsclean_image", "second_ft"])
+def test_sim_config_rejects_casa_ft_entry_in_combined_run(tmp_path, ft_kind, partner):
+    """CASA ft entries cannot be combined with other models (no beam/placement)."""
+    if ft_kind == "continuum_casa_ft":
+        ft_entry = _continuum_entry(tmp_path, backend="casa_ft", name="ft")
+    else:
+        ft_entry = _taylor_entry(tmp_path)
+    partners = {
+        "catalog": {"type": "component_sky_model", "catalog": "GLEAM"},
+        "wsclean_image": _continuum_entry(tmp_path, name="ws"),
+        "second_ft": _continuum_entry(tmp_path, backend="casa_ft", name="ft2"),
+    }
+
+    with pytest.raises(ValidationError, match="casa_ft.*cannot be combined"):
+        SimConfig(models=[partners[partner], ft_entry])
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize("ft_kind", ["continuum_casa_ft", "casa_taylor_terms"])
+def test_sim_config_accepts_single_casa_ft_entry(tmp_path, ft_kind):
+    """A lone CASA ft entry keeps working."""
+    if ft_kind == "continuum_casa_ft":
+        entry = _continuum_entry(tmp_path, backend="casa_ft")
+    else:
+        entry = _taylor_entry(tmp_path)
+
+    cfg = SimConfig(models=[entry])
+
+    assert len(cfg.models) == 1
+
+
+def test_sim_config_accepts_catalog_plus_multiple_wsclean_images(tmp_path):
+    """One catalogue plus N wsclean_predict image models is the supported mix."""
+    cfg = SimConfig(
+        models=[
+            {"type": "component_sky_model", "catalog": "GLEAM"},
+            _continuum_entry(tmp_path, name="a"),
+            _continuum_entry(tmp_path, name="b"),
+        ]
+    )
+
+    assert [m.type for m in cfg.models] == [
+        "component_sky_model",
+        "continuum_i_alpha",
+        "continuum_i_alpha",
+    ]
+
+
 def test_sim_config_rejects_model_and_catalog_together():
     """0.2 accepts one explicit sky model source per run."""
     with pytest.raises(ValidationError, match="one sky model source"):
@@ -541,3 +621,69 @@ def test_sim_config_accepts_spectral_cube_model_entry(tmp_path):
     assert len(cfg.models) == 1
     assert isinstance(cfg.models[0], SpectralCubeModelEntry)
     assert cfg.models[0].cube == str(cube_path)
+
+
+# ---------------------------------------------------------------------------
+# multimodal input: spectral cubes combine with catalogues and image models
+# ---------------------------------------------------------------------------
+
+
+def _cube_entry(tmp_path, name="cube"):
+    cube = tmp_path / f"{name}.fits"
+    cube.touch()
+    return {"type": "spectral_cube", "cube": str(cube)}
+
+
+def test_sim_config_accepts_catalog_images_and_several_cubes(tmp_path):
+    """A catalogue, continuum images and any number of cubes can be combined."""
+    cfg = SimConfig(
+        models=[
+            {"type": "component_sky_model", "catalog": "GLEAM"},
+            _continuum_entry(tmp_path, name="a"),
+            _cube_entry(tmp_path, name="hi1"),
+            _cube_entry(tmp_path, name="hi2"),
+        ]
+    )
+
+    assert [m.type for m in cfg.models] == [
+        "component_sky_model",
+        "continuum_i_alpha",
+        "spectral_cube",
+        "spectral_cube",
+    ]
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_sim_config_rejects_cube_with_casa_ft_entry(tmp_path):
+    """CASA ft entries stay sole-entry only, also next to a cube."""
+    with pytest.raises(ValidationError, match="casa_ft.*cannot be combined"):
+        SimConfig(models=[_cube_entry(tmp_path), _taylor_entry(tmp_path)])
+
+
+def test_img_config_spectral_mode_defaults_to_auto():
+    assert ImgConfig(pixels=64).spectral_mode == "auto"
+
+
+def test_img_config_rejects_cube_mode_for_oskar_dirty():
+    """The OSKAR dirty imager always combines channels, so cube mode is invalid."""
+    with pytest.raises(ValidationError, match="spectral_mode='cube' requires"):
+        ImgConfig(pixels=64, imager="oskar-dirty", spectral_mode="cube")
+
+
+@pytest.mark.parametrize(
+    "imager, mode, with_cube, expected",
+    [
+        ("wsclean", "auto", True, "cube"),
+        ("wsclean", "auto", False, "continuum"),
+        ("oskar-dirty", "auto", True, "continuum"),
+        ("wsclean", "continuum", True, "continuum"),
+        ("wsclean", "cube", False, "cube"),
+    ],
+)
+def test_resolve_spectral_mode(tmp_path, imager, mode, with_cube, expected):
+    """auto keeps the historical rule; explicit modes win."""
+    models = [_cube_entry(tmp_path)] if with_cube else []
+    img = ImgConfig(pixels=64, imager=imager, spectral_mode=mode)
+    cfg = SimConfig(models=models, imaging=[img])
+
+    assert resolve_spectral_mode(cfg.imaging[0], cfg) == expected

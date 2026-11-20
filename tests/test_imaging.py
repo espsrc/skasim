@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
+from astropy.wcs import WCS
 
 from skasim.config import (
     ImgConfig,
@@ -26,12 +27,15 @@ from skasim.imaging import (
     _sky_model_position_angle,
     build_wsclean_argv,
     collect_wsclean_outputs,
+    effective_wsclean_channels_out,
+    resolve_wsclean_img_config,
     run_dirty_imaging,
     run_wsclean_command,
     run_wsclean_imaging,
     write_fits_preview,
     write_sky_model_previews,
     wsclean_output_prefix,
+    wsclean_product_name,
 )
 from skasim.manifest import create_run_context
 
@@ -234,6 +238,107 @@ def test_run_wsclean_imaging_skips_moment8_without_spectral_cube(tmp_path, monke
     )
 
     assert "moment8" not in captured
+
+
+def test_resolve_wsclean_img_config_explicit_continuum_is_one_channel():
+    """Explicit continuum mode images all channels into a single image."""
+    img = ImgConfig(imager="wsclean", pixels=64, spectral_mode="continuum")
+
+    resolved = resolve_wsclean_img_config(img, "continuum", n_channels=2048)
+
+    assert resolved.channels_out == 1
+    assert resolved.join_channels is False
+    assert effective_wsclean_channels_out(resolved, 2048) == 1
+
+
+def test_resolve_wsclean_img_config_continuum_keeps_user_channels_out():
+    img = ImgConfig(
+        imager="wsclean", pixels=64, spectral_mode="continuum", channels_out=4
+    )
+
+    resolved = resolve_wsclean_img_config(img, "continuum", n_channels=2048)
+
+    assert resolved.channels_out == 4
+
+
+def test_resolve_wsclean_img_config_auto_continuum_is_unchanged():
+    """auto resolving to continuum keeps the historical settings."""
+    img = ImgConfig(imager="wsclean", pixels=64)
+
+    resolved = resolve_wsclean_img_config(img, "continuum", n_channels=16)
+
+    assert resolved is img
+    assert effective_wsclean_channels_out(resolved, 16) == 16
+
+
+def test_resolve_wsclean_img_config_cube_mode_is_per_channel():
+    img = ImgConfig(imager="wsclean", pixels=64, spectral_mode="cube")
+
+    resolved = resolve_wsclean_img_config(img, "cube", n_channels=16)
+
+    assert resolved.channels_out == 16
+    assert resolved.join_channels is False
+
+
+@pytest.mark.parametrize(
+    "mode, expect_moment8, expect_channels_out",
+    [("cube", True, "8"), ("continuum", False, "1")],
+)
+def test_run_wsclean_imaging_follows_block_spectral_mode_in_cube_run(
+    tmp_path, monkeypatch, mode, expect_moment8, expect_channels_out
+):
+    """In a run with a cube, each block images as its spectral_mode says."""
+    captured = {}
+
+    def fake_require(module_name):
+        if module_name == "karabo.imaging.imager_wsclean":
+            return SimpleNamespace(TMP_PREFIX_CUSTOM="tmp", TMP_PURPOSE_CUSTOM="test")
+        if module_name == "karabo.util.file_handler":
+            return SimpleNamespace(
+                FileHandler=lambda: SimpleNamespace(
+                    get_tmp_dir=lambda **kwargs: tmp_path
+                )
+            )
+        raise AssertionError(module_name)
+
+    def fake_run(argv, work_dir):
+        captured["argv"] = argv
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr("skasim.imaging.require_karabo_module", fake_require)
+    monkeypatch.setattr("skasim.imaging.run_wsclean_command", fake_run)
+    monkeypatch.setattr(
+        "skasim.loaders.image_models.run_moment8_for_spectral_cube",
+        lambda ctx, work_dir, prefix, tag: captured.setdefault("moment8", tag),
+    )
+    (tmp_path / "cube.fits").write_text("fits", encoding="utf-8")
+    block = ImgConfig(imager="wsclean", pixels=64, tag=mode, spectral_mode=mode)
+    config = SimConfig(
+        output_dir=str(tmp_path / "run"),
+        observation=ObsConfig(bandwidth_mhz=8.0, n_channels=8),
+        models=[
+            {"type": "component_sky_model", "catalog": "GLEAM"},
+            SpectralCubeModelEntry(
+                type="spectral_cube", cube=str(tmp_path / "cube.fits")
+            ),
+        ],
+        imaging=[block],
+    )
+    ctx = create_run_context(config)
+
+    run_wsclean_imaging(
+        ctx,
+        ctx.visibility_path,
+        0.2 * u.deg,
+        img_config=config.imaging[0],
+        sub_dir=ctx.work_dir / mode,
+        n_channels=8,
+    )
+
+    argv = captured["argv"]
+    assert argv[argv.index("-channels-out") + 1] == expect_channels_out
+    assert "-join-channels" not in argv
+    assert ("moment8" in captured) is expect_moment8
 
 
 def test_build_wsclean_argv_uses_default_command():
@@ -942,3 +1047,75 @@ def test_run_wsclean_imaging_cleanup_keeps_run_scoped_outputs(tmp_path, monkeypa
     output_paths = [output.path for output in ctx.manifest.outputs]
     assert f"default/{prefix}-MFS-image.fits" in output_paths
     assert not (ctx.work_dir / "default" / "wsclean-0000-temp.fits").exists()
+
+
+@pytest.mark.parametrize(
+    "filename, product, per_channel",
+    [
+        ("cont_wsclean-MFS-image.fits", "image", False),
+        ("cont_wsclean-image.fits", "image", False),  # -channels-out 1
+        ("cont_wsclean-psf.fits", "psf", False),
+        ("cont_wsclean-0007-residual.fits", "residual", True),
+        ("cont_wsclean-12345-model.fits", "model", True),
+        ("sub/cont_wsclean-image-pb.fits", "image-pb", False),
+        # a tag that looks like a product or holds digits is not misread
+        ("model_test_wsclean-image.fits", "image", False),
+    ],
+)
+def test_wsclean_product_name(filename, product, per_channel):
+    prefix = Path(filename).name.split("-", 1)[0]
+    assert wsclean_product_name(filename, prefix) == (product, per_channel)
+
+
+def test_wsclean_product_name_without_prefix_spots_channel_index():
+    assert wsclean_product_name("x-0001-image.fits", None) == (None, True)
+    assert wsclean_product_name("x-MFS-image.fits", None) == (None, False)
+
+
+def _wsclean_channel_image(path, freq_hz, width_hz, value):
+    """A per-channel image as WSClean writes it: its own one-pixel FREQ axis."""
+    header = fits.Header()
+    header["CTYPE1"], header["CRPIX1"], header["CRVAL1"], header["CDELT1"] = (
+        "RA---SIN", 2.0, 10.0, -1e-3
+    )
+    header["CTYPE2"], header["CRPIX2"], header["CRVAL2"], header["CDELT2"] = (
+        "DEC--SIN", 2.0, 2.0, 1e-3
+    )
+    header["CTYPE3"], header["CRPIX3"], header["CRVAL3"], header["CDELT3"] = (
+        "FREQ", 1.0, freq_hz, width_hz
+    )
+    header["CUNIT3"] = "Hz"
+    header["CTYPE4"], header["CRPIX4"], header["CRVAL4"], header["CDELT4"] = (
+        "STOKES", 1.0, 1.0, 1.0
+    )
+    data = np.full((1, 1, 3, 3), value, dtype=np.float32)
+    fits.writeto(path, data, header, overwrite=True)
+
+
+def test_stack_channels_uses_each_channel_frequency(tmp_path):
+    """The stacked FREQ axis starts at channel 0 and steps by the spacing.
+
+    WSClean's CRVAL3 is the channel's own centre; reading it as a cube-wide
+    reference used to double the spacing and shift the axis.
+    """
+    from skasim.imaging import stack_channels
+
+    start, width = 1417.6e6, 50e3
+    paths = []
+    for ch in range(4):
+        path = tmp_path / f"line_wsclean-{ch:04d}-image.fits"
+        _wsclean_channel_image(path, start + ch * width, width, float(ch))
+        paths.append(path)
+    out = tmp_path / "line_wsclean-cube-image.fits"
+
+    stack_channels(paths, out)
+
+    header = fits.getheader(out)
+    data = fits.getdata(out)
+    assert data.shape == (4, 3, 3)
+    assert [float(plane[0, 0]) for plane in data] == [0.0, 1.0, 2.0, 3.0]
+    assert header["CRPIX3"] == 1.0
+    assert header["CRVAL3"] == pytest.approx(start)
+    assert header["CDELT3"] == pytest.approx(width)
+    freqs = WCS(header).spectral.pixel_to_world(np.arange(4)).to_value(u.Hz)
+    np.testing.assert_allclose(freqs, start + np.arange(4) * width)
