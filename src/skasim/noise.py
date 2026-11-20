@@ -3,8 +3,11 @@
 Implements the radiometer equation from Radcliffe et al. (2024), MNRAS 527, 942:
     sigma_pq = (1/eta_c) * sqrt(SEFD_p * SEFD_q / (2 * t_int * delta_nu))
 
-Noise is circularly complex Gaussian with zero mean and variance sigma_pq^2
-per visibility (real and imaginary components each have variance sigma_pq^2/2).
+sigma_pq is the noise in the real *or* imaginary part of one visibility
+(Wrobel & Walker convention). The injected noise is circularly complex
+Gaussian with zero mean: the real and imaginary parts are independent and
+each has standard deviation sigma_pq, so the complex visibility has total
+variance 2 * sigma_pq^2.
 """
 
 from __future__ import annotations

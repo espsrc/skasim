@@ -48,10 +48,10 @@ def _normalise_catalog_value(value):
 # --------------------------------------------------------------------------- #
 
 
-def _require_existing_path(value: str) -> str:
+def _require_existing_path(value: str, what: str = "model file") -> str:
     path = Path(value).expanduser()
     if not path.exists():
-        raise ValueError(f"model file does not exist: {value}")
+        raise ValueError(f"{what} does not exist: {value}")
     return value
 
 
@@ -261,7 +261,7 @@ class NoiseInjectionConfig(BaseModel):
         if self.enabled and self.sefd_file is None:
             raise ValueError("noise_injection.sefd_file is required when enabled=true")
         if self.sefd_file is not None:
-            _require_existing_path(self.sefd_file)
+            _require_existing_path(self.sefd_file, "SEFD file")
         return self
 
 
