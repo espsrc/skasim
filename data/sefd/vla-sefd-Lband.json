@@ -1,0 +1,31 @@
+{
+  "antennas": [
+    {"name": "station001", "sefd_jy": 420.0},
+    {"name": "station002", "sefd_jy": 420.0},
+    {"name": "station003", "sefd_jy": 420.0},
+    {"name": "station004", "sefd_jy": 420.0},
+    {"name": "station005", "sefd_jy": 420.0},
+    {"name": "station006", "sefd_jy": 420.0},
+    {"name": "station007", "sefd_jy": 420.0},
+    {"name": "station008", "sefd_jy": 420.0},
+    {"name": "station009", "sefd_jy": 420.0},
+    {"name": "station010", "sefd_jy": 420.0},
+    {"name": "station011", "sefd_jy": 420.0},
+    {"name": "station012", "sefd_jy": 420.0},
+    {"name": "station013", "sefd_jy": 420.0},
+    {"name": "station014", "sefd_jy": 420.0},
+    {"name": "station015", "sefd_jy": 420.0},
+    {"name": "station016", "sefd_jy": 420.0},
+    {"name": "station017", "sefd_jy": 420.0},
+    {"name": "station018", "sefd_jy": 420.0},
+    {"name": "station019", "sefd_jy": 420.0},
+    {"name": "station020", "sefd_jy": 420.0},
+    {"name": "station021", "sefd_jy": 420.0},
+    {"name": "station022", "sefd_jy": 420.0},
+    {"name": "station023", "sefd_jy": 420.0},
+    {"name": "station024", "sefd_jy": 420.0},
+    {"name": "station025", "sefd_jy": 420.0},
+    {"name": "station026", "sefd_jy": 420.0},
+    {"name": "station027", "sefd_jy": 420.0}
+  ]
+}
