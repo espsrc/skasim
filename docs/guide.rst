@@ -368,7 +368,7 @@ SEFD-Based Noise Injection (Experimental)
 
 .. warning::
    SEFD-based noise injection is a temporary, experimental feature. It will be
-   moved to Karabo and is not meant to stay in ``skasim``. Expect the
+   contributed to Karabo and is not meant to stay in ``skasim``. Expect the
    ``noise_injection`` block and the SEFD tables in ``data/sefd/`` to change or
    be removed once Karabo provides this feature.
 
@@ -433,7 +433,7 @@ minimum, maximum and mean :math:`\sigma_{pq}`.
      "models": [{"type": "component_sky_model", "catalog": "MIGHTEE"}],
      "noise_injection": {
        "enabled": true,
-       "sefd_file": "data/sefd/ska-mid-aastar-band2-corrected-sefd.json",
+       "sefd_file": "data/sefd/ska-mid-aastar-band2-sefd.json",
        "eta_c": 0.88
      }
    }
@@ -458,7 +458,7 @@ run fails if the MS refers to more antennas than the file lists.
 **Bundled tables** (in ``data/sefd/`` of the repository; the Docker image does
 not include them, so mount the file into the container):
 
-- ``ska-mid-aastar-band1-sefd.json``, ``ska-mid-aastar-band2-corrected-sefd.json``,
+- ``ska-mid-aastar-band1-sefd.json``, ``ska-mid-aastar-band2-sefd.json``,
   ``ska-mid-aastar-band5a-sefd.json``, ``ska-mid-aastar-band5b-sefd.json``:
   SKA-Mid AA*, 144 dishes.
 - ``ska-low-aastar-200mhz-300mhzbw-sefd.json``: SKA-Low AA*, 307 stations.
