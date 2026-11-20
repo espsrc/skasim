@@ -34,10 +34,17 @@ from skasim.pipeline import (
 from skasim.sky import SkyModel
 
 
+def _fake_line_cube() -> np.ndarray:
+    cube = np.zeros((8, 64, 64), dtype=np.float32)
+    cube[4, 32, 32] = 1.0
+    return cube
+
+
 def _write_minimal_fits_cube(path: Path, n_channels: int = 8, pixels: int = 64) -> Path:
     """Create a tiny valid FITS cube for spectral-cube model tests."""
     path = Path(path)
     data = np.zeros((n_channels, pixels, pixels), dtype=np.float32)
+    data[n_channels // 2, pixels // 2, pixels // 2] = 1.0  # a line to predict
     header = fits.Header()
     header["NAXIS"] = 3
     header["NAXIS1"] = pixels
@@ -267,7 +274,7 @@ def test_run_spectral_cube_pipeline_calls_wsclean_and_logs_summary(
                 nterms=1,
                 reffreq=f"{ctx.config.observation.frequency_mhz * 1e6}Hz",
                 intermediates=[],
-                cube_data=np.zeros((8, 64, 64), dtype=np.float32),
+                cube_data=_fake_line_cube(),
                 header=_build_fake_header(),
                 freq_axis=3,
             ),
@@ -321,15 +328,15 @@ def test_run_spectral_cube_pipeline_calls_wsclean_and_logs_summary(
         os.chdir(old_cwd)
 
 
-def test_run_rejects_mixed_spectral_cube_and_component_models(tmp_path):
-    """Spectral-cube model entries cannot coexist with other model types."""
+def test_run_rejects_spectral_cube_with_casa_ft_entry(tmp_path):
+    """A cube can be combined with other models, but not with CASA ft entries."""
     cube_path = tmp_path / "cube.fits"
     _write_minimal_fits_cube(cube_path, n_channels=8)
     tt0 = tmp_path / "tt0.fits"
     tt1 = tmp_path / "tt1.fits"
     _write_minimal_fits_cube(tt0, n_channels=1)
     _write_minimal_fits_cube(tt1, n_channels=1)
-    with pytest.raises(ValueError, match="spectral_cube mode is exclusive"):
+    with pytest.raises(ValueError, match="casa_ft.*cannot be combined"):
         SimConfig(
             models=[
                 SpectralCubeModelEntry(type="spectral_cube", cube=str(cube_path)),
@@ -1401,3 +1408,118 @@ def test_record_sky_layout_writes_composition_panel_and_catalogue_flux(tmp_path)
     panel = [o for o in ctx.manifest.outputs if o.role == "sky_composition"]
     assert len(panel) == 1
     assert (ctx.work_dir / panel[0].path).exists()
+
+
+# ---------------------------------------------------------------------------
+# multimodal cubes: imaging spectral modes
+# ---------------------------------------------------------------------------
+
+
+def _cube_run_config(tmp_path, imaging, with_catalogue=True):
+    cube = tmp_path / "cube.fits"
+    _write_minimal_fits_cube(cube, n_channels=8)
+    models = [SpectralCubeModelEntry(type="spectral_cube", cube=str(cube))]
+    if with_catalogue:
+        models.insert(0, {"type": "component_sky_model", "catalog": "GLEAM"})
+    return SimConfig(output_dir=str(tmp_path / "run"), models=models, imaging=imaging)
+
+
+def test_record_imaging_spectral_modes_notes_missing_continuum_block(tmp_path):
+    from skasim.pipeline import NO_CONTINUUM_BLOCK_NOTE, _record_imaging_spectral_modes
+
+    config = _cube_run_config(
+        tmp_path, [ImgConfig(tag="line", imager="wsclean", pixels=64)]
+    )
+    ctx = create_run_context(config)
+
+    details = _record_imaging_spectral_modes(ctx, config.imaging)
+
+    assert details == {"modes": {"line": "cube"}, "note": NO_CONTINUUM_BLOCK_NOTE}
+    names = [m.name for m in ctx.manifest.milestones]
+    assert "imaging_spectral_modes" in names
+
+
+@pytest.mark.parametrize("with_catalogue", [True, False])
+def test_record_imaging_spectral_modes_without_note(tmp_path, with_catalogue):
+    """No note with a continuum block, or for a cube-only run."""
+    imaging = [ImgConfig(tag="line", imager="wsclean", pixels=64)]
+    if with_catalogue:
+        imaging.append(
+            ImgConfig(
+                tag="cont", imager="wsclean", pixels=64, spectral_mode="continuum"
+            )
+        )
+    config = _cube_run_config(tmp_path, imaging, with_catalogue=with_catalogue)
+    ctx = create_run_context(config)
+
+    from skasim.pipeline import _record_imaging_spectral_modes
+
+    details = _record_imaging_spectral_modes(ctx, config.imaging)
+
+    assert "note" not in details
+
+
+def _sin_cube(tmp_path, name, centre_deg, n=32, n_chan=8, cdelt_deg=1e-3):
+    from astropy.wcs import WCS
+
+    wcs = WCS(naxis=3)
+    wcs.wcs.ctype = ["RA---SIN", "DEC--SIN", "FREQ"]
+    wcs.wcs.crval = [centre_deg[0], centre_deg[1], 1.42e9]
+    wcs.wcs.crpix = [n / 2 + 0.5, n / 2 + 0.5, 1.0]
+    wcs.wcs.cdelt = [-cdelt_deg, cdelt_deg, 20e3]
+    header = wcs.to_header()
+    header["BUNIT"] = "Jy/pixel"
+    data = np.zeros((n_chan, n, n), dtype=np.float32)
+    data[3:5, n // 2 - 2 : n // 2 + 2, n // 2 - 2 : n // 2 + 2] = 0.01
+    path = tmp_path / f"{name}.fits"
+    fits.writeto(path, data, header, overwrite=True)
+    return path
+
+
+def test_phase_centre_from_a_cube_listed_first(tmp_path):
+    """Cubes count as image entries for the phase centre, in models order."""
+    from skasim.loaders import image_model_center_entry, image_model_entries
+    from skasim.pipeline import phase_centre_rule
+
+    cube = _sin_cube(tmp_path, "hi", (150.2, 2.1))
+    image = _sin_model(tmp_path, "img", (150.0, 2.0))
+    alpha = _sin_model(tmp_path, "alpha", (150.0, 2.0))
+    config = SimConfig(
+        models=[{"type": "spectral_cube", "cube": str(cube)}, _continuum(image, alpha)]
+    )
+
+    index, entry, centre = image_model_center_entry(image_model_entries(config))
+
+    assert phase_centre_rule(config) == "image_model"
+    assert (index, entry.type) == (0, "spectral_cube")
+    assert centre.ra.deg == pytest.approx(150.2, abs=1e-6)
+    assert centre.dec.deg == pytest.approx(2.1, abs=1e-6)
+
+
+def test_record_sky_layout_records_deciding_cube_and_draws_it(tmp_path):
+    import matplotlib
+
+    from skasim.pipeline import _record_sky_layout
+
+    matplotlib.use("Agg", force=True)
+    cube = _sin_cube(tmp_path, "hi", (150.0, 2.0))
+    config = SimConfig(
+        models=[{"type": "spectral_cube", "cube": str(cube)}],
+        output_dir=str(tmp_path / "run"),
+    )
+    ctx = create_run_context(config)
+
+    _record_sky_layout(ctx, SkyCoord(150.0, 2.0, unit="deg"), 0.5 * u.deg, 1420 * u.MHz)
+
+    rule = next(m for m in ctx.manifest.milestones if m.name == "phase_centre_resolved")
+    assert rule.details["model_type"] == "spectral_cube"
+    assert rule.details["model_entry_index"] == 0
+    footprints = next(
+        m for m in ctx.manifest.milestones if m.name == "image_model_footprints"
+    )
+    assert footprints.details["entries"][0]["model_type"] == "spectral_cube"
+    panel = [o for o in ctx.manifest.outputs if o.role == "sky_composition"]
+    assert len(panel) == 1
+    assert "sky_composition_preview_failed" not in [
+        m.name for m in ctx.manifest.milestones
+    ]

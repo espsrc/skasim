@@ -60,12 +60,18 @@ Multimodal runs record, as milestones:
   half-power radius and the simulation field.
 - ``image_model_injected`` (one per image model): backend, WCS placement
   (``-shift`` position, whether the image was regridded, flux before and
-  after), and intrinsic and beam-attenuated flux at the band centre.
+  after), and intrinsic and beam-attenuated flux at the band centre. For
+  spectral cubes: line channels and frequencies, intrinsic and attenuated
+  integrated line flux with its unit, ``SPECSYS`` and the frequency
+  interpretation, the regridding crop and time, and channel-grid warnings.
 - ``image_model_merged`` (one per image model): ``MODEL_DATA`` added into
   ``DATA``. These are in-place changes to the Measurement Set, recorded as
   milestones rather than outputs.
 - ``image_injection_completed``: number of merges and
   ``model_data_contents: "last_entry_only"``.
+- ``imaging_spectral_modes``: the effective ``spectral_mode`` of each imaging
+  block, with a ``note`` when cubes are combined with continuum models but no
+  block makes a continuum image.
 
 The Weblog
 ----------
@@ -82,9 +88,11 @@ Key Sections
    - Shows provenance (original file paths).
    - Provides visual previews. For CASA Taylor-term models, the ``tt0`` term is automatically exported to FITS/PNG for display.
    - For runs with image models, a **Sky composition** table (position,
-     placement, intrinsic and in-beam flux for every component) and a
-     **Combined view** of catalogue sources, image footprints, the beam
-     half-power circle and the simulation field around the phase centre.
+     placement, intrinsic and in-beam flux for every component; spectral
+     cubes add a line-flux column with their line channels and a note on the
+     spectral frame) and a **Combined view** of catalogue sources, image
+     footprints, cube grids with their line emission, the beam half-power
+     circle and the simulation field around the phase centre.
      
 2. **Observation Details**:
    - Spectral grid setup.

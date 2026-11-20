@@ -88,6 +88,14 @@ Combining one catalogue with several image models is specified in
 Gaussian beam applied to image models, WCS placement through WSClean `-shift`
 or `reproject_exact` regridding, CASA `ft` entries accepted only alone, and
 composition reporting in the manifest and weblog.
+
+Spectral cubes join the same scheme (`.hermes/PRD-multimodal-cubes.md`): any
+number of `spectral_cube` entries next to a catalogue and continuum images,
+WCS placement and the shared beam per channel (regridding only emission
+channels, cropped), per-block `spectral_mode` (`cube`/`continuum`) so one run
+yields a line cube and a continuum image, and line flux / line channels /
+`SPECSYS` reporting. No continuum subtraction in skasim; velocity axes and
+frame conversion are issue #50.
 - Image-only runs create a base MS and may fall back to a zero-flux placeholder source.
 - Weblog should show model provenance and visual previews where possible.
 

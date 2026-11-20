@@ -109,8 +109,23 @@ def angular_separation_deg(
     return np.degrees(np.arctan2(num, den))
 
 
+def pixel_to_icrs_deg(wcs, x: ArrayLike, y: ArrayLike) -> tuple[np.ndarray, np.ndarray]:
+    """ICRS RA and Dec (degrees) of 0-based pixel positions of a celestial WCS.
+
+    RA/Dec WCS are evaluated directly. Other frames, e.g. Galactic GLON/GLAT,
+    are transformed to ICRS, so the result can be compared with the phase
+    centre or fed to an RA/Dec WCS.
+    """
+    if str(wcs.wcs.lngtyp).strip().upper() == "RA":
+        ra, dec = wcs.all_pix2world(x, y, 0)
+        return np.asarray(ra), np.asarray(dec)
+    world = wcs.pixel_to_world(x, y).icrs
+    return np.asarray(world.ra.deg), np.asarray(world.dec.deg)
+
+
 __all__ = [
     "GaussianStationBeam",
     "angular_separation_deg",
+    "pixel_to_icrs_deg",
     "simulation_beam",
 ]

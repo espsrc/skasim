@@ -11,13 +11,18 @@ from astropy.wcs import WCS
 
 from skasim.config import ImgConfig
 from skasim.loaders.wsclean_predict import (
+    MIN_PREDICT_PIXELS,
     build_wsclean_predict_argv,
     format_wsclean_shift,
+    inject_spectral_cube_with_wsclean_predict,
+    line_flux_report,
     merge_model_data_into_data,
+    place_spectral_cube,
     prepare_predict_grid,
     write_per_channel_model_fits,
     wsclean_predict_placement,
 )
+from skasim.primary_beam import GaussianStationBeam
 
 
 def _build_spectral_header(n_channels: int = 4, pixels: int = 8) -> fits.Header:
@@ -371,3 +376,295 @@ def test_build_predict_argv_includes_shift_before_ms():
     i = argv.index("-shift")
     assert argv[i + 1 : i + 3] == ["15h31m25.36s", "35d33m40.2s"]
     assert argv[-1] == "vis.ms"
+
+
+# ---------------------------------------------------------------------------
+# spectral cubes: placement, emission crops and per-channel beam
+# ---------------------------------------------------------------------------
+
+CUBE_FREQS_HZ = 1.4e9 + np.arange(16) * 1e6
+
+
+def _cube_header(header2d, freqs_hz=CUBE_FREQS_HZ):
+    header = header2d.copy()
+    header["CTYPE3"] = "FREQ"
+    header["CRPIX3"] = 1.0
+    header["CRVAL3"] = float(freqs_hz[0])
+    header["CDELT3"] = float(freqs_hz[1] - freqs_hz[0])
+    header["CUNIT3"] = "Hz"
+    return header
+
+
+def _line_cube(header2d, shape, source, channels=range(5, 9)):
+    """A point source with emission only in ``channels`` (Jy/pixel)."""
+    plane, snapped = _point_source_image(header2d, shape, source)
+    cube = np.zeros((len(CUBE_FREQS_HZ),) + shape, dtype=np.float32)
+    for k, channel in enumerate(channels):
+        cube[channel] = plane * (1.0 + k)
+    return cube, snapped
+
+
+def test_place_spectral_cube_direct_placement_applies_beam_per_channel():
+    """A cube on the WSClean grid is not regridded; each channel gets its beam."""
+    header2d = _sin_header(64, 1e-3, (PHASE_CENTRE.ra.deg, PHASE_CENTRE.dec.deg))
+    source = PHASE_CENTRE.spherical_offsets_by(0.02 * u.deg, 0.01 * u.deg)
+    cube, snapped = _line_cube(header2d, (64, 64), source, channels=[0, 15])
+    beam = GaussianStationBeam(field_fwhm_deg=0.2, ref_freq_hz=1.4e9)
+
+    out, header, report = place_spectral_cube(
+        cube, _cube_header(header2d), CUBE_FREQS_HZ, PHASE_CENTRE, beam, "cube"
+    )
+
+    assert report["resampled"] is False
+    assert report["primary_beam_applied"] is True
+    assert report["line_channels"] == [0, 15]
+    sep = snapped.separation(PHASE_CENTRE).deg
+    for channel, scale in ((0, 1.0), (15, 2.0)):
+        expected = 2.5 * scale * beam.power_response(sep, CUBE_FREQS_HZ[channel])
+        assert out[channel].sum() == pytest.approx(expected, rel=1e-5)
+    # The beam narrows with frequency, so the high channel is attenuated more.
+    assert out[15].sum() / 2.0 < out[0].sum()
+    assert cube[0].sum() == pytest.approx(2.5)  # input left untouched
+
+
+def _galactic_header(n, cdelt_deg, centre):
+    galactic = centre.galactic
+    wcs = WCS(naxis=2)
+    wcs.wcs.ctype = ["GLON-SIN", "GLAT-SIN"]
+    wcs.wcs.crval = [galactic.l.deg, galactic.b.deg]
+    wcs.wcs.crpix = [n / 2 + 1, n / 2 + 1]
+    wcs.wcs.cdelt = [-cdelt_deg, cdelt_deg]
+    return wcs.to_header()
+
+
+def test_place_spectral_cube_regrids_galactic_cube_to_its_icrs_position():
+    """GLON/GLAT cubes are regridded onto the RA/Dec grid at the right position.
+
+    The grid size and the beam separations must use ICRS positions, not the
+    Galactic longitude/latitude read as RA/Dec.
+    """
+    target = PHASE_CENTRE.spherical_offsets_by(0.05 * u.deg, -0.03 * u.deg)
+    header2d = _galactic_header(48, 1e-3, target)
+    source = target.spherical_offsets_by(10 * u.arcsec, 8 * u.arcsec)
+    cube, snapped = _line_cube(header2d, (48, 48), source)
+    beam = GaussianStationBeam(field_fwhm_deg=0.5, ref_freq_hz=1.4e9)
+
+    out, header, report = place_spectral_cube(
+        cube, _cube_header(header2d), CUBE_FREQS_HZ, PHASE_CENTRE, beam, "cube"
+    )
+
+    assert report["resampled"] is True
+    n = report["n_pixels"]
+    assert n < 200  # sized from the ICRS footprint (about 48 px), not NaN/huge
+    out_wcs = WCS(header).celestial
+    assert list(out_wcs.wcs.ctype)[:2] == ["RA---SIN", "DEC--SIN"]
+    pixel_arcsec = report["pixel_size_arcsec"]
+    sep = snapped.separation(PHASE_CENTRE).deg
+    for k, channel in enumerate(range(5, 9)):
+        plane = out[channel]
+        moved = _flux_centroid(plane, header).separation(snapped).arcsec
+        assert moved < 0.1 * pixel_arcsec
+        expected = 2.5 * (1.0 + k) * beam.power_response(sep, CUBE_FREQS_HZ[channel])
+        assert plane.sum() == pytest.approx(expected, rel=2e-3)
+
+
+def test_place_spectral_cube_crops_equal_regridding_every_channel():
+    """Regridding only emission channels, cropped, gives the full result."""
+    target = PHASE_CENTRE.spherical_offsets_by(0.1 * u.deg, 0.05 * u.deg)
+    header2d = _sin_header(96, 1e-3, (target.ra.deg, target.dec.deg), projection="TAN")
+    source = target.spherical_offsets_by(20 * u.arcsec, -15 * u.arcsec)
+    cube, snapped = _line_cube(header2d, (96, 96), source)
+
+    out, out_header, report = place_spectral_cube(
+        cube, _cube_header(header2d), CUBE_FREQS_HZ, PHASE_CENTRE, None, "cube"
+    )
+    full, full_header, _ = prepare_predict_grid(list(cube), header2d, PHASE_CENTRE)
+
+    assert report["resampled"] is True
+    assert report["regrid_n_channels"] == 4
+    assert report["regrid_crop"]["x"][1] - report["regrid_crop"]["x"][0] == 1
+    assert out.shape[1] < full[0].shape[0]  # the crop shrinks the predict grid
+    pixel_arcsec = report["pixel_size_arcsec"]
+    for channel in range(len(CUBE_FREQS_HZ)):
+        assert out[channel].sum() == pytest.approx(
+            full[channel].sum(), rel=1e-5, abs=1e-6
+        )
+        if full[channel].sum() > 0:
+            a = _flux_centroid(out[channel], out_header)
+            b = _flux_centroid(full[channel], full_header)
+            assert a.separation(b).arcsec < 0.05 * pixel_arcsec
+    assert report["flux_after_jy"] == pytest.approx(report["flux_before_jy"], rel=1e-3)
+    assert report["regrid_elapsed_s"] >= 0.0
+
+
+def test_place_spectral_cube_rejects_empty_cube():
+    header2d = _sin_header(64, 1e-3, (PHASE_CENTRE.ra.deg, PHASE_CENTRE.dec.deg))
+    cube = np.zeros((4, 64, 64), dtype=np.float32)
+
+    with pytest.raises(ValueError, match="no non-zero pixels"):
+        place_spectral_cube(
+            cube, _cube_header(header2d), CUBE_FREQS_HZ[:4], PHASE_CENTRE, None, "c"
+        )
+
+
+def test_place_spectral_cube_without_phase_centre_keeps_legacy_behaviour():
+    header2d = _sin_header(64, 1e-3, (10.0, 20.0))
+    cube, _ = _line_cube(header2d, (64, 64), SkyCoord(10.0, 20.0, unit="deg"))
+
+    out, _, report = place_spectral_cube(
+        cube, _cube_header(header2d), CUBE_FREQS_HZ, None, None, "cube"
+    )
+
+    assert report["wcs_placement"] == "phase_centre_assumed"
+    assert report["primary_beam_applied"] is False
+    assert np.array_equal(out, cube)
+
+
+def test_inject_spectral_cube_predicts_placed_cube_with_shift(tmp_path, monkeypatch):
+    """The injector predicts the placed cube on its own grid with -shift."""
+    from types import SimpleNamespace
+
+    target = PHASE_CENTRE.spherical_offsets_by(0.05 * u.deg, 0.0 * u.deg)
+    header2d = _sin_header(64, 1e-3, (target.ra.deg, target.dec.deg), projection="TAN")
+    cube, _ = _line_cube(header2d, (64, 64), target)
+    captured = {}
+    monkeypatch.setattr(
+        "skasim.loaders.wsclean_predict.run_wsclean_predict",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    ctx = SimpleNamespace(work_dir=tmp_path)
+    entry = SimpleNamespace(type="spectral_cube")
+    beam = GaussianStationBeam(field_fwhm_deg=1.0, ref_freq_hz=1.4e9)
+
+    report = inject_spectral_cube_with_wsclean_predict(
+        ctx,
+        entry,
+        0,
+        tmp_path / "vis.MS",
+        ImgConfig(pixels=64, imager="wsclean"),
+        cube,
+        _cube_header(header2d),
+        3,
+        phase_center=PHASE_CENTRE,
+        beam=beam,
+    )
+
+    assert report["wcs_placement"] == "fits_wcs"
+    assert report["resampled"] is True
+    assert report["primary_beam_applied"] is True
+    assert captured["n_pixels"] == report["n_pixels"]
+    assert report["line_flux_unit"] == "Jy MHz"  # no RESTFRQ in the header
+    assert report["line_channels"] == [5, 8]
+    assert 0 < report["attenuated_line_flux"] < report["intrinsic_line_flux"]
+    assert captured["n_channels"] == len(CUBE_FREQS_HZ)
+    assert captured["shift"] == tuple(report["shift_wsclean"])
+    planes = sorted((tmp_path).rglob("*-model.fits"))
+    assert len(planes) == len(CUBE_FREQS_HZ)
+
+
+@pytest.mark.parametrize("size", [1, 9, 10, 11])
+def test_prepare_predict_grid_conserves_flux_of_odd_sized_images(size):
+    """Odd sizes used to align input and output pixels and lose ~6e-4 of flux."""
+    target = PHASE_CENTRE.spherical_offsets_by(0.1 * u.deg, 0.05 * u.deg)
+    header = _sin_header(size, 1e-3, (target.ra.deg, target.dec.deg), projection="TAN")
+    data = np.ones((size, size))
+
+    (out,), _, placement = prepare_predict_grid([data], header, PHASE_CENTRE)
+
+    assert placement["resampled"] is True
+    assert out.sum() == pytest.approx(data.sum(), rel=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# minimum predict grid: WSClean 3.5 crashes or hangs below ~24 pixels
+# ---------------------------------------------------------------------------
+
+
+def test_small_image_on_wsclean_grid_is_not_placed_directly():
+    header = _sin_header(8, 1e-3, (PHASE_CENTRE.ra.deg, PHASE_CENTRE.dec.deg))
+
+    placement = wsclean_predict_placement(header, (8, 8), PHASE_CENTRE)
+
+    assert placement["direct_placement_ok"] is False
+    assert "smaller than" in placement["reason"]
+
+
+@pytest.mark.parametrize("projection, size", [("SIN", 8), ("TAN", 1), ("TAN", 9)])
+def test_small_images_are_padded_to_the_minimum_predict_grid(projection, size):
+    target = PHASE_CENTRE.spherical_offsets_by(0.1 * u.deg, 0.05 * u.deg)
+    header = _sin_header(
+        size, 1e-3, (target.ra.deg, target.dec.deg), projection=projection
+    )
+    data = np.ones((size, size))
+
+    (out,), out_header, placement = prepare_predict_grid([data], header, PHASE_CENTRE)
+
+    assert placement["resampled"] is True
+    assert placement["n_pixels"] >= MIN_PREDICT_PIXELS
+    assert out.shape == (placement["n_pixels"], placement["n_pixels"])
+    assert out.sum() == pytest.approx(data.sum(), rel=1e-5)
+    # The model stays where its WCS puts it.
+    centre = WCS(header).pixel_to_world((size - 1) / 2.0, (size - 1) / 2.0)
+    moved = _flux_centroid(out, out_header).separation(centre).arcsec
+    assert moved < 0.1 * placement["pixel_size_arcsec"]
+
+
+def test_single_pixel_line_cube_gets_the_minimum_predict_grid():
+    """The HI demo crash: a 1-pixel emission crop made a 6x6 predict grid."""
+    target = PHASE_CENTRE.spherical_offsets_by(6 * u.arcmin, -4 * u.arcmin)
+    header2d = _sin_header(
+        64, 2 / 3600, (target.ra.deg, target.dec.deg), projection="TAN"
+    )
+    cube = np.zeros((len(CUBE_FREQS_HZ), 64, 64), dtype=np.float32)
+    cube[5:9, 32, 32] = 0.02
+
+    out, _, report = place_spectral_cube(
+        cube, _cube_header(header2d), CUBE_FREQS_HZ, PHASE_CENTRE, None, "cube"
+    )
+
+    assert report["resampled"] is True
+    assert report["n_pixels"] >= MIN_PREDICT_PIXELS
+    assert out.shape[1:] == (report["n_pixels"], report["n_pixels"])
+    assert out.sum() == pytest.approx(cube.sum(), rel=1e-5)
+
+
+def test_predict_argv_rejects_grids_below_the_minimum():
+    img = ImgConfig(pixels=64, fov_deg=0.064, imager="wsclean")
+
+    with pytest.raises(ValueError, match="at least"):
+        build_wsclean_predict_argv(
+            "wsclean",
+            Path("vis.ms"),
+            img,
+            "prefix",
+            4,
+            pixel_size_arcsec=3.6,
+            n_pixels=MIN_PREDICT_PIXELS - 2,
+        )
+
+
+def test_line_flux_report_in_jy_km_s_with_rest_frequency():
+    """Radio convention: dv = c * dnu / RESTFRQ."""
+    freqs = 1.42e9 + np.arange(8) * 20e3
+    cube = np.zeros((8, 4, 4))
+    cube[2:5, 1, 1] = 0.01  # 3 channels x 10 mJy
+    attenuated = 0.5 * cube
+
+    report = line_flux_report(cube, attenuated, freqs, [2, 4], 1.420405752e9)
+
+    dv = 299792.458 * 20e3 / 1.420405752e9
+    assert report["line_flux_unit"] == "Jy km/s"
+    assert report["intrinsic_line_flux"] == pytest.approx(0.03 * dv)
+    assert report["attenuated_line_flux"] == pytest.approx(0.015 * dv)
+    assert report["line_frequency_range_hz"] == [freqs[2], freqs[4]]
+
+
+def test_line_flux_report_falls_back_to_jy_mhz():
+    freqs = 1.42e9 + np.arange(4) * 0.5e6
+    cube = np.ones((4, 2, 2))
+
+    report = line_flux_report(cube, cube, freqs, [0, 3], None)
+
+    assert report["line_flux_unit"] == "Jy MHz"
+    assert report["intrinsic_line_flux"] == pytest.approx(16 * 0.5)
+    assert report["rest_frequency_hz"] is None

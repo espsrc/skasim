@@ -1,6 +1,6 @@
 {
     "title": "Multimodal demo: catalogue + two image models",
-    "description": "VLA-C composite: component catalogue plus two compact continuum I+alpha image models, one tangent at the phase centre and one 7.2 arcmin away on a TAN grid (regridded). Generate the models with scripts/make_multimodal_demo_models.py and check the result with scripts/check_multimodal_run.py.",
+    "description": "VLA-C composite: component catalogue plus two compact continuum I+alpha image models, one tangent at the phase centre and one 7.2 arcmin away on a TAN grid (regridded). Imaged twice: OSKAR dirty and a CLEANed WSClean continuum image, on which check_multimodal_run.py measures peaks (dirty-beam sidelobes of nearby sources bias dirty peaks). Generate the models with scripts/make_multimodal_demo_models.py and check the result with scripts/check_multimodal_run.py.",
     "telescope": "VLA",
     "telescope_version": "C",
     "models": [
@@ -27,7 +27,7 @@
         "frequency_mhz": 1455.5,
         "bandwidth_mhz": 8.0,
         "n_channels": 16,
-        "observation_time_s": 600
+        "observation_time_s": 7200
     },
     "uv_coverage": false,
     "imaging": [
@@ -36,6 +36,15 @@
             "pixels": 512,
             "cell_size_arcsec": 3.0,
             "imager": "oskar-dirty"
+        },
+        {
+            "tag": "clean",
+            "pixels": 512,
+            "cell_size_arcsec": 3.0,
+            "imager": "wsclean",
+            "spectral_mode": "continuum",
+            "multiscale": false,
+            "clean_iterations": 10000
         }
     ],
     "output_dir": "demo_output/fits_model_vla_c_catalog_plus_two_images_quick",

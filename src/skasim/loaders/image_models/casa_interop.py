@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS, FITSFixedWarning
 from loguru import logger
@@ -297,63 +296,24 @@ def prepare_spectral_cube_for_casa(
         f"mean={float(data_out.mean()):.3e} nonzero_pixels={nonzero_out}/{data_out.size}"
     )
 
-    phase_center = None
-    if visibility_path is not None:
-        phase_center = _read_ms_phase_center(visibility_path)
-    if phase_center is None:
-        try:
-            wcs = WCS(header_in).celestial
-            center_x = (n_ra_in - 1) / 2.0
-            center_y = (n_dec_in - 1) / 2.0
-            sky = wcs.pixel_to_world(center_x, center_y)
-            if isinstance(sky, SkyCoord):
-                phase_center = (float(sky.ra.deg), float(sky.dec.deg))
-        except Exception as exc:
-            logger.debug(
-                f"prepare_spectral_cube_for_casa: WCS phase centre failed for {source_path}: {exc}"
-            )
-            phase_center = None
-    if phase_center is None:
-        try:
-            ra_val = float(header_in.get(f"CRVAL{spatial_axes[0]}", 0.0))
-            dec_val = float(header_in.get(f"CRVAL{spatial_axes[1]}", 0.0))
-            phase_center = (ra_val, dec_val)
-        except Exception as exc:
-            raise ValueError(
-                f"Cannot determine spatial phase centre for {source_path}"
-            ) from exc
-
-    ra_deg, dec_deg = phase_center
-    cdelt1 = float(header_in[f"CDELT{spatial_axes[0]}"])
-    cdelt2 = float(header_in[f"CDELT{spatial_axes[1]}"])
-    cunit1 = str(header_in.get(f"CUNIT{spatial_axes[0]}") or "").strip().lower()
-    cunit2 = str(header_in.get(f"CUNIT{spatial_axes[1]}") or "").strip().lower()
-    if cunit1 == "rad":
-        cdelt1 = np.degrees(cdelt1)
-    elif cunit1 in {"asec", "arcsec"}:
-        cdelt1 = cdelt1 / 3600.0
-    if cunit2 == "rad":
-        cdelt2 = np.degrees(cdelt2)
-    elif cunit2 in {"asec", "arcsec"}:
-        cdelt2 = cdelt2 / 3600.0
+    # Keep the cube's own celestial WCS: the WSClean predict step places the
+    # cube on sky from it (directly through -shift, or after regridding).
+    celestial = WCS(header_in).celestial
+    if celestial.naxis != 2 or celestial.wcs.lng != 0:
+        raise ValueError(
+            f"{source_path} needs a celestial WCS with longitude (RA) before "
+            "latitude (Dec)"
+        )
+    celestial_header = celestial.to_header()
+    for key in ("WCSAXES", "MJDREF", "DATEREF", "MJD-OBS", "DATE-OBS"):
+        celestial_header.pop(key, None)
 
     header = fits.Header()
     header["NAXIS"] = 3
     header["NAXIS1"] = n_ra_in
     header["NAXIS2"] = n_dec_in
     header["NAXIS3"] = n_freq_out
-
-    header["CTYPE1"] = "RA---SIN"
-    header["CRPIX1"] = float(n_ra_in) / 2.0
-    header["CRVAL1"] = float(ra_deg)
-    header["CDELT1"] = float(cdelt1)
-    header["CUNIT1"] = "deg"
-
-    header["CTYPE2"] = "DEC--SIN"
-    header["CRPIX2"] = float(n_dec_in) / 2.0
-    header["CRVAL2"] = float(dec_deg)
-    header["CDELT2"] = float(cdelt2)
-    header["CUNIT2"] = "deg"
+    header.update(celestial_header)
 
     header["CTYPE3"] = "FREQ"
     header["CRPIX3"] = 1.0
@@ -365,9 +325,14 @@ def prepare_spectral_cube_for_casa(
     if bunit in _ACCEPTED_JY_PER_PIXEL_UNITS:
         bunit = "Jy/pixel"
     header["BUNIT"] = bunit
-    header["RESTFRQ"] = float(np.mean(freqs_out_hz))
-    header["SPECSYS"] = "LSRK"
-    header["SSYSOBS"] = "LSRK"
+    # Spectral metadata is carried over, never invented: RESTFRQ feeds the
+    # Jy km/s line-flux report and SPECSYS is recorded (frequencies are taken
+    # as observed frequencies; see issue #50).
+    restfrq = header_in.get("RESTFRQ", header_in.get("RESTFREQ"))
+    if restfrq is not None:
+        header["RESTFRQ"] = float(restfrq)
+    if header_in.get("SPECSYS"):
+        header["SPECSYS"] = str(header_in["SPECSYS"])
     header["HISTORY"] = (
         "resampled to MS spectral grid by skasim.prepare_spectral_cube_for_casa"
     )

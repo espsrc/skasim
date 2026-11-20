@@ -203,7 +203,7 @@ def write_spectral_cube_input_preview(
         try:
             wcs = WCS(header).celestial
             pix = np.array([header["NAXIS1"] / 2.0, header["NAXIS2"] / 2.0])
-            sky = wcs.pixel_to_world(*pix)
+            sky = wcs.pixel_to_world(*pix).icrs
             recenter = (sky.ra.deg, sky.dec.deg, fov.to(u.deg).value)
         except Exception as exc:
             logger.debug(
@@ -380,7 +380,13 @@ def _write_image_model_two_panel_preview(
 
         # left panel: natural image extent
         left = aplpy.FITSFigure(hdul, figure=fig, subplot=[0.06, 0.12, 0.43, 0.78])
-        if model_center is not None and model_extent is not None:
+        # recenter takes the image's own world coordinates; model_center is
+        # ICRS, so only use it for RA/Dec images (others show their full extent)
+        if (
+            model_center is not None
+            and model_extent is not None
+            and _is_equatorial(source_hdu.header)
+        ):
             width_deg = model_extent["width_deg"] * 1.05
             height_deg = model_extent["height_deg"] * 1.05
             left.recenter(
@@ -475,6 +481,14 @@ def _fits_image_extent_deg(header: fits.Header) -> Optional[Dict[str, float]]:
         }
 
 
+def _is_equatorial(header: fits.Header) -> bool:
+    """True when the celestial WCS axes are RA/Dec."""
+    try:
+        return str(WCS(header).celestial.wcs.lngtyp).strip().upper() == "RA"
+    except Exception:
+        return False
+
+
 def _fits_image_center(header: fits.Header) -> Optional[SkyCoord]:
     """Return the celestial centre of a 2D FITS image, or None if WCS is unavailable."""
     naxis1 = int(header.get("NAXIS1") or 1)
@@ -483,7 +497,7 @@ def _fits_image_center(header: fits.Header) -> Optional[SkyCoord]:
         wcs = WCS(header).celestial
         center = wcs.pixel_to_world((naxis1 - 1) / 2.0, (naxis2 - 1) / 2.0)
         if isinstance(center, SkyCoord):
-            return center
+            return center.icrs
     except Exception as exc:
         logger.debug(f"_fits_image_center: WCS failed: {exc}")
     return None
@@ -638,7 +652,31 @@ _COMPOSITION_TYPE_LABELS = {
     "continuum_i_alpha": r"CONTINUUM $I,\,\alpha$",
     "static_stokes_maps": "STOKES MAPS",
     "casa_taylor_terms": "TAYLOR TERMS",
+    "spectral_cube": "LINE CUBE",
 }
+
+
+def _cube_emission_offsets(path: Path, center: SkyCoord):
+    """Moment-0 emission mask of a cube on (east, north) arcmin offsets.
+
+    Returns ``(east, north, mask)`` 2D arrays, or ``None`` when the cube has no
+    emission or its axes cannot be read.
+    """
+    with fits.open(path, memmap=True) as hdul:
+        header = hdul[0].header
+        data = np.asarray(hdul[0].data, dtype=np.float32)
+    data = np.squeeze(data)
+    if data.ndim != 3:
+        return None
+    wcs = WCS(header).celestial
+    # The two celestial axes are the last two NumPy axes for FITS axes 1-2.
+    mask = np.any(data != 0, axis=0)
+    if not mask.any():
+        return None
+    ny, nx = mask.shape
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    east, north = center.icrs.spherical_offsets_to(wcs.pixel_to_world(xx, yy).icrs)
+    return east.to(u.arcmin).value, north.to(u.arcmin).value, mask
 
 
 def _footprint_outline(header: fits.Header, center: SkyCoord, n_edge: int = 40):
@@ -663,8 +701,9 @@ def _footprint_outline(header: fits.Header, center: SkyCoord, n_edge: int = 40):
             y1 - (y1 - y0) * t,
         ]
     )
-    world = wcs.pixel_to_world(xs, ys)
-    east, north = center.spherical_offsets_to(world)
+    # spherical_offsets_to needs both in one frame (model WCS may be Galactic)
+    world = wcs.pixel_to_world(xs, ys).icrs
+    east, north = center.icrs.spherical_offsets_to(world)
     return east.to(u.arcmin).value, north.to(u.arcmin).value
 
 
@@ -743,8 +782,44 @@ def write_sky_composition_preview(
                 continue
             color = _COMPOSITION_COLORS[index % len(_COMPOSITION_COLORS)]
             style = _COMPOSITION_STYLES[index % len(_COMPOSITION_STYLES)]
-            ax.fill(east, north, color=color, alpha=0.25, linewidth=0, zorder=2)
-            ax.plot(east, north, color=color, linestyle=style, linewidth=1.4, zorder=2)
+            is_cube = isinstance(entry, SpectralCubeModelEntry)
+            if is_cube:
+                # Cube grid as a thin outline; its line emission (moment-0
+                # extent) filled, so the line source stands out from the grid.
+                try:
+                    emission = _cube_emission_offsets(path, center)
+                except Exception as exc:
+                    logger.debug(f"sky composition: no moment-0 for {path}: {exc}")
+                    emission = None
+                if emission is not None:
+                    ax.contourf(
+                        emission[0],
+                        emission[1],
+                        emission[2].astype(float),
+                        levels=[0.5, 1.5],
+                        colors=[color],
+                        alpha=0.55,
+                        zorder=3,
+                    )
+                    ax.contour(
+                        emission[0],
+                        emission[1],
+                        emission[2].astype(float),
+                        levels=[0.5],
+                        colors=[color],
+                        linewidths=1.4,
+                        zorder=3,
+                    )
+            else:
+                ax.fill(east, north, color=color, alpha=0.25, linewidth=0, zorder=2)
+            ax.plot(
+                east,
+                north,
+                color=color,
+                linestyle=style,
+                linewidth=1.0 if is_cube else 1.4,
+                zorder=2,
+            )
             extent = max(
                 extent, float(np.max(np.abs(east))), float(np.max(np.abs(north)))
             )
@@ -755,7 +830,7 @@ def write_sky_composition_preview(
                     color=color,
                     linestyle=style,
                     linewidth=1.4,
-                    label=f"IMAGE {index}: "
+                    label=f"{'CUBE' if is_cube else 'IMAGE'} {index}: "
                     + _COMPOSITION_TYPE_LABELS.get(
                         entry.type, entry.type.replace("_", " ").upper()
                     ),

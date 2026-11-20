@@ -123,7 +123,14 @@ WSClean-only flags (ignored for ``oskar-dirty``):
 - ``local_rms`` (Optional[bool]): Enable ``-local-rms``. Default off.
 - ``join_channels`` (Optional[bool]): Enable ``-join-channels``. Default on.
 - ``channels_out`` (Optional[int]): Number of WSClean output channels. Defaults
-  to the observation channel count (capped at 8 when derived internally).
+  to the observation channel count (1 in explicit ``continuum`` mode).
+- ``spectral_mode`` (``"auto"``, ``"cube"`` or ``"continuum"``, default
+  ``"auto"``): ``cube`` images every channel separately (no channel joining,
+  no multiscale) and adds moment-8 maps; ``continuum`` images all channels
+  combined (``channels_out=1`` unless set). ``auto`` uses ``cube`` when the run
+  has a ``spectral_cube`` model and the block uses WSClean, otherwise
+  ``continuum``. ``cube`` requires ``imager: "wsclean"``; the OSKAR dirty
+  imager always combines channels.
 - ``padding`` (Optional[float]): WSClean padding factor.
 - ``threads`` (Optional[int]): WSClean parallel thread count (``-j``).
 
@@ -225,8 +232,9 @@ Combining Models (Multimodal Runs)
 ----------------------------------
 
 A run may combine one ``component_sky_model`` with any number of
-``continuum_i_alpha`` and ``static_stokes_maps`` entries, e.g. a background
-catalogue plus one or more extended targets:
+``continuum_i_alpha``, ``static_stokes_maps`` and ``spectral_cube`` entries,
+e.g. a background catalogue plus one or more extended targets, or an HI line
+source in a field of continuum sources:
 
 .. code-block:: json
 
@@ -237,10 +245,12 @@ catalogue plus one or more extended targets:
      {"type": "static_stokes_maps", "stokes_i": "halo_i.fits"}
    ]
 
-``configs/fits_model/vla_c_catalog_plus_two_images_quick.json`` is a small
-worked example (generate its models with
-``scripts/make_multimodal_demo_models.py`` and check a finished run with
-``scripts/check_multimodal_run.py``).
+``configs/fits_model/vla_c_catalog_plus_two_images_quick.json`` (two
+continuum images) and ``configs/fits_model/vla_c_catalog_image_hi_cube_quick.json``
+(continuum image plus HI cube) are small worked examples. Generate their models
+with ``scripts/make_multimodal_demo_models.py`` and
+``scripts/make_multimodal_cube_demo_models.py``, and check a finished run with
+``scripts/check_multimodal_run.py``.
 
 How the components are added
    OSKAR simulates the catalogue into ``DATA``. Each image model is then
@@ -268,12 +278,17 @@ Placement on the sky
    centre pixel); otherwise (other projections, a tangent point away from the
    phase centre, rotated or mirrored axes, non-square pixels or images) it is
    regridded with ``reproject_exact`` onto a WSClean-native grid tangent at the
-   phase centre, conserving flux. The record of each entry states which path
-   was taken, the shift, and the flux before and after regridding.
+   phase centre, conserving flux. Predict grids are at least 32 pixels wide
+   (WSClean crashes or hangs on smaller ones), so small models and compact
+   cube emission are zero-padded by regridding. The record of each entry
+   states which path was taken, the shift, and the flux before and after
+   regridding.
 
 Phase centre
    The phase centre is ``center`` if given, otherwise the catalogue centre,
-   otherwise the first image model's centre. The deciding rule is recorded,
+   otherwise the centre of the first image model (spectral cubes included) in
+   ``models`` order. The deciding rule (and, for ``image_model``, the deciding
+   entry) is recorded,
    and a warning is raised when an image model reaches beyond the beam
    half-power radius or the simulation field.
 
@@ -281,8 +296,37 @@ Restrictions
    The deprecated CASA ``ft`` backends (``casa_taylor_terms`` and
    ``continuum_i_alpha`` with ``injection_backend: "casa_ft"``) receive
    neither the shared beam nor WCS placement, so they are only accepted as the
-   sole model entry. ``spectral_cube`` entries cannot be combined with other
-   models, and a run takes at most one ``component_sky_model``.
+   sole model entry. A run takes at most one ``component_sky_model``.
+
+Spectral cubes
+   Cubes follow the same placement and beam rules as images, channel by
+   channel: each channel is attenuated by the power beam at its own frequency.
+   When a cube needs regridding, only channels with emission are regridded,
+   cropped to the region holding the emission (identical result, much faster
+   for a line source). The cube's size is independent of the imaging blocks.
+   ``DATA`` then holds continuum and line together; ``skasim`` does not
+   subtract the continuum. To get both a line cube and a continuum image, use
+   two imaging blocks:
+
+   .. code-block:: json
+
+      "imaging": [
+        {"tag": "cont", "imager": "oskar-dirty", "spectral_mode": "continuum",
+         "pixels": 512, "cell_size_arcsec": 3.0},
+        {"tag": "line", "imager": "wsclean", "spectral_mode": "cube",
+         "pixels": 512, "cell_size_arcsec": 3.0}
+      ]
+
+   A run that combines cubes with continuum models but has no continuum block
+   records a note. Each cube's line channels (MS channel indices and
+   frequencies) and integrated line flux (Jy km/s when the cube has
+   ``RESTFRQ``, otherwise Jy MHz) are recorded, so continuum subtraction can
+   be done downstream. All components share the observation's single channel
+   grid; a warning is recorded when MS channels are wider than a cube's
+   channels (the line is smoothed, flux is conserved). Cube frequencies must be
+   a ``FREQ`` axis and are used as observed frequencies; ``SPECSYS`` is
+   recorded but not converted (velocity axes and frame conversion:
+   `issue #50 <https://github.com/espsrc/skasim/issues/50>`_).
 
 WSClean predict settings
    Threads and the WSClean executable for prediction come from the first

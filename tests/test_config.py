@@ -11,6 +11,7 @@ from skasim.config import (
     ObsConfig,
     SimConfig,
     SpectralCubeModelEntry,
+    resolve_spectral_mode,
 )
 
 # ---------------------------------------------------------------------------
@@ -620,3 +621,69 @@ def test_sim_config_accepts_spectral_cube_model_entry(tmp_path):
     assert len(cfg.models) == 1
     assert isinstance(cfg.models[0], SpectralCubeModelEntry)
     assert cfg.models[0].cube == str(cube_path)
+
+
+# ---------------------------------------------------------------------------
+# multimodal input: spectral cubes combine with catalogues and image models
+# ---------------------------------------------------------------------------
+
+
+def _cube_entry(tmp_path, name="cube"):
+    cube = tmp_path / f"{name}.fits"
+    cube.touch()
+    return {"type": "spectral_cube", "cube": str(cube)}
+
+
+def test_sim_config_accepts_catalog_images_and_several_cubes(tmp_path):
+    """A catalogue, continuum images and any number of cubes can be combined."""
+    cfg = SimConfig(
+        models=[
+            {"type": "component_sky_model", "catalog": "GLEAM"},
+            _continuum_entry(tmp_path, name="a"),
+            _cube_entry(tmp_path, name="hi1"),
+            _cube_entry(tmp_path, name="hi2"),
+        ]
+    )
+
+    assert [m.type for m in cfg.models] == [
+        "component_sky_model",
+        "continuum_i_alpha",
+        "spectral_cube",
+        "spectral_cube",
+    ]
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_sim_config_rejects_cube_with_casa_ft_entry(tmp_path):
+    """CASA ft entries stay sole-entry only, also next to a cube."""
+    with pytest.raises(ValidationError, match="casa_ft.*cannot be combined"):
+        SimConfig(models=[_cube_entry(tmp_path), _taylor_entry(tmp_path)])
+
+
+def test_img_config_spectral_mode_defaults_to_auto():
+    assert ImgConfig(pixels=64).spectral_mode == "auto"
+
+
+def test_img_config_rejects_cube_mode_for_oskar_dirty():
+    """The OSKAR dirty imager always combines channels, so cube mode is invalid."""
+    with pytest.raises(ValidationError, match="spectral_mode='cube' requires"):
+        ImgConfig(pixels=64, imager="oskar-dirty", spectral_mode="cube")
+
+
+@pytest.mark.parametrize(
+    "imager, mode, with_cube, expected",
+    [
+        ("wsclean", "auto", True, "cube"),
+        ("wsclean", "auto", False, "continuum"),
+        ("oskar-dirty", "auto", True, "continuum"),
+        ("wsclean", "continuum", True, "continuum"),
+        ("wsclean", "cube", False, "cube"),
+    ],
+)
+def test_resolve_spectral_mode(tmp_path, imager, mode, with_cube, expected):
+    """auto keeps the historical rule; explicit modes win."""
+    models = [_cube_entry(tmp_path)] if with_cube else []
+    img = ImgConfig(pixels=64, imager=imager, spectral_mode=mode)
+    cfg = SimConfig(models=models, imaging=[img])
+
+    assert resolve_spectral_mode(cfg.imaging[0], cfg) == expected

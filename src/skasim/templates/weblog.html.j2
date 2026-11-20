@@ -102,6 +102,7 @@
     table.composition-table tr:last-child td { border-bottom: none; }
     table.composition-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
     table.composition-table .src { font-family: monospace; font-size: 0.75rem; color: var(--muted); word-break: break-all; }
+    table.composition-table .line-channels { color: var(--muted); font-size: 0.72rem; }
     .composition-notes { display: grid; grid-template-columns: max-content 1fr; gap: 0.2rem 1rem; font-size: 0.8rem; margin-top: 0.9rem; }
     .composition-notes dt { color: var(--muted); text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.05em; padding-top: 0.1rem; }
     .composition-notes dd { margin: 0; font-variant-numeric: tabular-nums; }
@@ -370,7 +371,7 @@
           <thead>
             <tr>
               <th>Component</th><th>Source</th><th class="num">Offset</th><th>Placement</th>
-              <th class="num">Intrinsic ({{ sky_composition.flux_unit }})</th><th class="num">In beam ({{ sky_composition.flux_unit }})</th><th class="num">Beam loss</th>
+              <th class="num">Intrinsic ({{ sky_composition.flux_unit }})</th><th class="num">In beam ({{ sky_composition.flux_unit }})</th>{% if sky_composition.has_line %}<th class="num">Line flux in beam</th>{% endif %}<th class="num">Beam loss</th>
             </tr>
           </thead>
           <tbody>
@@ -382,6 +383,7 @@
               <td>{{ row.placement }}</td>
               <td class="num">{{ row.intrinsic_text }}</td>
               <td class="num">{{ row.attenuated_text }}</td>
+              {% if sky_composition.has_line %}<td class="num">{% if row.line_text %}{{ row.line_text }}{% if row.line_channels_text %}<div class="line-channels">{{ row.line_channels_text }}</div>{% endif %}{% else %}—{% endif %}</td>{% endif %}
               <td class="num">{% if row.attenuation_pct is not none %}{{ "%.1f" | format(row.attenuation_pct) }}%{% else %}—{% endif %}{% if row.beyond_half_power %}<span class="flag" title="Footprint extends beyond the beam half-power radius">▲</span>{% endif %}</td>
             </tr>
           {% endfor %}
@@ -391,6 +393,7 @@
           {% if sky_composition.phase_centre %}<dt>Phase centre</dt><dd>{{ sky_composition.phase_centre }} · {{ sky_composition.phase_centre_rule }}</dd>{% endif %}
           {% if sky_composition.beam_power_fwhm_arcmin is not none %}<dt>Beam</dt><dd>Gaussian (OSKAR station beam), power FWHM {{ "%.2f" | format(sky_composition.beam_power_fwhm_arcmin) }}′{% if sky_composition.ref_freq_mhz %} at {{ "%.1f" | format(sky_composition.ref_freq_mhz) }} MHz{% endif %}</dd>{% endif %}
           {% if sky_composition.ref_freq_mhz %}<dt>Fluxes</dt><dd>Stokes I at {{ "%.1f" | format(sky_composition.ref_freq_mhz) }} MHz; images are merged into DATA one at a time{% if sky_composition.n_merges %} ({{ sky_composition.n_merges }} merges){% endif %}</dd>{% endif %}
+          {% if sky_composition.line_notes %}<dt>Line cubes</dt><dd>{% for note in sky_composition.line_notes %}{{ note }}{% if not loop.last %}<br>{% endif %}{% endfor %}</dd>{% endif %}
           {% if sky_composition.model_data_last_entry_only %}<dt>MODEL_DATA</dt><dd>holds only the last image model's prediction; DATA holds every component</dd>{% endif %}
         </dl>
       </div>

@@ -5,7 +5,9 @@ cluster check (``scripts/check_multimodal_run.py``) can compare dirty-image
 peaks with the beam-attenuated fluxes skasim reports:
 
 * ``mm_target_a``: SIN grid tangent at the phase centre (placed directly with
-  ``wsclean -shift``), 50 mJy source 40" east / 20" north of the phase centre.
+  ``wsclean -shift``), 50 mJy source 60" west / 42" south of the phase centre,
+  away from the catalogue sources and on a pixel centre of both the 2" model
+  grid and the 3" demo dirty-image grid.
 * ``mm_target_b``: TAN grid tangent at its own centre, 6' east / 4' north of
   the phase centre, so skasim must regrid it onto the WSClean predict grid;
   80 mJy source at its centre, alpha = -0.7.
@@ -52,10 +54,10 @@ def main() -> None:
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # Target A: tangent at the phase centre; source 40" E, 20" N.
+    # Target A: tangent at the phase centre; source 60" W, 42" S.
     a = np.zeros((PIXELS, PIXELS))
-    # NumPy [y, x]; RA increases towards lower x (CDELT1 < 0): 20 px east, 10 px north
-    a[PIXELS // 2 + 10, PIXELS // 2 - 20] = 0.05
+    # NumPy [y, x]; RA increases towards lower x (CDELT1 < 0): 30 px west, 21 px south
+    a[PIXELS // 2 - 21, PIXELS // 2 + 30] = 0.05
     _write(out / "mm_target_a_i.fits", a, PHASE_CENTRE, "Jy/pixel")
     _write(out / "mm_target_a_alpha.fits", np.zeros_like(a), PHASE_CENTRE, "")
 

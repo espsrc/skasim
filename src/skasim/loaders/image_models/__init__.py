@@ -52,6 +52,7 @@ from .fits_io import (
     _select_wsclean_img_config,
     component_model_entries,
     image_model_center,
+    image_model_center_entry,
     image_model_entries,
     image_model_footprints,
     primary_model_fits_path,
@@ -216,6 +217,7 @@ def inject_image_models(
                 product.cube_data,
                 product.header,
                 product.freq_axis,
+                **beam_kwargs,
             )
             _record_injection(
                 ctx,
@@ -297,6 +299,7 @@ __all__ = [
     "component_model_entries",
     "has_spectral_cube_model",
     "image_model_center",
+    "image_model_center_entry",
     "image_model_entries",
     "image_model_footprints",
     "inject_image_models",

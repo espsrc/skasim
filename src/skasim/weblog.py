@@ -17,6 +17,12 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from jinja2 import Environment, PackageLoader, select_autoescape
 
+from .config import resolve_spectral_mode
+from .imaging import (
+    effective_wsclean_channels_out,
+    resolve_wsclean_img_config,
+    wsclean_product_name,
+)
 from .loaders.image_models import (
     FitsCubeInfo,
     read_fits_cube_info,
@@ -95,10 +101,15 @@ def _find_science_products(manifest: RunManifest, work_dir: Path) -> list[dict]:
             continue
 
         role = output.role or ""
-        # Ignore per-channel WSClean outputs; keep MFS, cube_image, and moment8.
-        if output.imager == "wsclean" and "-MFS-" not in output.path:
-            if role not in ("cube_image", "moment8"):
-                continue
+        # Ignore per-channel WSClean outputs (<prefix>-NNNN-<product>). Keep
+        # combined products: <prefix>-MFS-<product>, or <prefix>-<product>
+        # when WSClean wrote a single output channel.
+        if (
+            output.imager == "wsclean"
+            and role not in ("cube_image", "moment8")
+            and wsclean_product_name(output.path, output.image_product_id)[1]
+        ):
+            continue
 
         product_id = output.image_product_id or "imaging"
         tag = (output.metadata or {}).get("tag", "default")
@@ -140,6 +151,7 @@ def _find_science_products(manifest: RunManifest, work_dir: Path) -> list[dict]:
         fpath = work_dir / output.path
         preview = fpath.with_suffix(".png")
         product[key] = {
+            "path": output.path,
             "fits": output.path,
             "preview": str(preview.relative_to(work_dir)) if preview.exists() else None,
             "data": _file_to_base64_data_uri(preview) if preview.exists() else None,
@@ -341,6 +353,12 @@ def _format_beam(beam: dict | None) -> str | None:
     return " · ".join(parts) if parts else None
 
 
+def _spectral_mode_label(spectral_mode: str) -> str:
+    if spectral_mode == "cube":
+        return "cube (one image per channel)"
+    return "continuum (channels combined)"
+
+
 def _imager_parameter_rows_for_block(
     img_config,
     manifest: RunManifest,
@@ -356,16 +374,15 @@ def _imager_parameter_rows_for_block(
     if fov_deg is not None:
         pixel_size_arcsec = fov_deg * 3600.0 / img_config.pixels
 
+    spectral_mode = resolve_spectral_mode(img_config, config)
     if img_config.imager == "wsclean":
-        # reflect any explicit overrides; default values match build_wsclean_argv
-        effective_channels_out = (
-            img_config.channels_out
-            if img_config.channels_out is not None
-            else min(n_channels, 8)
-        )
+        # show the settings run_wsclean_imaging actually used
+        img_config = resolve_wsclean_img_config(img_config, spectral_mode, n_channels)
+        effective_channels_out = effective_wsclean_channels_out(img_config, n_channels)
         rows = [
             ("Imager", "WSClean"),
             ("Command", img_config.wsclean_command),
+            ("Spectral mode", _spectral_mode_label(spectral_mode)),
             ("Weighting", f"Briggs robust {_format_float(img_config.robust)}"),
             (
                 "Multiscale",
@@ -675,6 +692,10 @@ def _report_warnings(manifest: RunManifest) -> list[str]:
             warnings.append(f"Geometry [{tag}]: {w}")
 
     warnings.extend(_footprint_warnings(manifest))
+
+    modes = _find_milestone_details(manifest, "imaging_spectral_modes")
+    if modes.get("note"):
+        warnings.append(f"Imaging: {modes['note']}")
 
     return warnings
 
@@ -1057,6 +1078,12 @@ def _sky_composition(manifest: RunManifest) -> Optional[dict]:
         if offset is None and footprint.get("centre_offset_deg") is not None:
             offset = footprint["centre_offset_deg"] * 3600.0
         source = footprint.get("source") or details.get("prefix") or ""
+        if model_type == "spectral_cube":
+            rows.append(
+                _cube_composition_row(details, index, source, offset, placement)
+            )
+            rows[-1]["beyond_half_power"] = footprint.get("beyond_beam_half_power")
+            continue
         rows.append(
             {
                 "component": f"Image {index}",
@@ -1071,9 +1098,10 @@ def _sky_composition(manifest: RunManifest) -> Optional[dict]:
             }
         )
     for row in rows:
-        row["attenuation_pct"] = _attenuation_percent(
-            row.get("intrinsic_jy"), row.get("attenuated_jy")
-        )
+        if "attenuation_pct" not in row:
+            row["attenuation_pct"] = _attenuation_percent(
+                row.get("intrinsic_jy"), row.get("attenuated_jy")
+            )
     flux_unit, flux_scale, flux_decimals = _flux_display_unit(
         [row.get("intrinsic_jy") for row in rows]
         + [row.get("attenuated_jy") for row in rows]
@@ -1095,9 +1123,7 @@ def _sky_composition(manifest: RunManifest) -> Optional[dict]:
     return {
         "rows": rows,
         "flux_unit": flux_unit,
-        "phase_centre_rule": _PHASE_CENTRE_RULE_LABELS.get(
-            rule.get("rule"), rule.get("rule")
-        ),
+        "phase_centre_rule": _phase_centre_rule_label(rule),
         "phase_centre": (
             SkyCoord(rule["ra_deg"] * u.deg, rule["dec_deg"] * u.deg).to_string(
                 "hmsdms", precision=2
@@ -1114,7 +1140,70 @@ def _sky_composition(manifest: RunManifest) -> Optional[dict]:
         "model_data_last_entry_only": completed.get("model_data_contents")
         == "last_entry_only",
         "n_merges": completed.get("n_merges"),
+        "has_line": any(row.get("line_text") for row in rows),
+        "line_notes": _line_notes(injected),
     }
+
+
+def _phase_centre_rule_label(rule: dict) -> Optional[str]:
+    name = rule.get("rule")
+    label = _PHASE_CENTRE_RULE_LABELS.get(name, name)
+    if name == "image_model" and rule.get("model_type"):
+        kind = "Cube" if rule["model_type"] == "spectral_cube" else "Image"
+        label = f"{label} ({kind} {rule.get('model_entry_index')})"
+    return label
+
+
+def _cube_composition_row(
+    details: dict, index, source, offset: Optional[float], placement: str
+) -> dict:
+    """Sky-composition row for a spectral cube: line flux instead of continuum."""
+    unit = details.get("line_flux_unit")
+    intrinsic = details.get("intrinsic_line_flux")
+    attenuated = details.get("attenuated_line_flux")
+    line_text = None
+    if unit and attenuated is not None:
+        line_text = f"{attenuated:.4g}"
+        if intrinsic is not None:
+            line_text += f" of {intrinsic:.4g}"
+        line_text += f" {unit}"
+    channels = details.get("line_channels")
+    freqs = details.get("line_frequency_range_hz")
+    channel_text = None
+    if channels:
+        channel_text = f"ch {channels[0]}–{channels[1]}"
+        if freqs:
+            channel_text += f" ({freqs[0] / 1e6:.4f}–{freqs[1] / 1e6:.4f} MHz)"
+    return {
+        "component": f"Cube {index}",
+        "color": "spectral-cube",
+        "type": _COMPONENT_TYPE_LABELS.get("spectral_cube", "Spectral cube"),
+        "source": Path(str(source)).name if source else "",
+        "offset": f"{offset / 60.0:.2f}′" if offset is not None else "—",
+        "placement": placement,
+        "intrinsic_jy": None,
+        "attenuated_jy": None,
+        "line_text": line_text,
+        "line_channels_text": channel_text,
+        "attenuation_pct": _attenuation_percent(intrinsic, attenuated),
+    }
+
+
+def _line_notes(injected: list[dict]) -> list[str]:
+    """Spectral-frame assumption and channel warnings for the cubes of a run."""
+    notes = []
+    for details in injected:
+        if details.get("model_type") != "spectral_cube":
+            continue
+        label = f"Cube {details.get('model_entry_index')}"
+        specsys = details.get("specsys") or "not set"
+        notes.append(
+            f"{label}: SPECSYS {specsys}; frequencies used as observed (MS) "
+            "frequencies, no frame conversion"
+        )
+        for warning in details.get("warnings") or []:
+            notes.append(f"{label}: {warning}")
+    return notes
 
 
 def _sky_model_summary(manifest: RunManifest) -> list[dict]:

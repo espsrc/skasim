@@ -17,13 +17,19 @@ import numpy as np
 from astropy.coordinates import SkyCoord
 from loguru import logger
 
-from .config import ImgConfig, SimConfig, has_spectral_cube_model
+from .config import (
+    ImgConfig,
+    SimConfig,
+    has_spectral_cube_model,
+    resolve_spectral_mode,
+)
 from .image_geometry import ImageGeometry
 from .imaging import run_dirty_imaging, run_wsclean_imaging
 from .loaders import (
     FitsCatalogLoader,
     component_model_entries,
     image_model_center,
+    image_model_center_entry,
     image_model_entries,
     image_model_footprints,
     inject_image_models,
@@ -334,15 +340,17 @@ def _record_sky_layout(
             details=catalogue_beam_flux(table, center, beam),
         )
     rule = phase_centre_rule(config)
-    ctx.add_milestone(
-        "phase_centre_resolved",
-        "completed",
-        details={
-            "rule": rule,
-            "ra_deg": float(center.icrs.ra.deg),
-            "dec_deg": float(center.icrs.dec.deg),
-        },
-    )
+    details = {
+        "rule": rule,
+        "ra_deg": float(center.icrs.ra.deg),
+        "dec_deg": float(center.icrs.dec.deg),
+    }
+    if rule == "image_model":
+        found = image_model_center_entry(image_model_entries(config))
+        if found is not None:
+            details["model_entry_index"] = found[0]
+            details["model_type"] = found[1].type
+    ctx.add_milestone("phase_centre_resolved", "completed", details=details)
     logger.info(f"Phase centre rule: {rule}")
 
     entries = image_model_entries(config)
@@ -998,6 +1006,33 @@ def build_zero_flux_sky_model(center: SkyCoord) -> SkyModel:
 # --------------------------------------------------------------------------- #
 
 
+NO_CONTINUUM_BLOCK_NOTE = (
+    "The run combines spectral cubes with continuum models but has no imaging "
+    "block in continuum mode; add a block with spectral_mode='continuum' to get "
+    "a continuum image."
+)
+
+
+def _record_imaging_spectral_modes(ctx: RunContext, img_configs) -> dict:
+    """Record the effective spectral mode of every imaging block.
+
+    Adds a note when cubes are combined with continuum models but no block
+    produces a continuum image (the run is not failed for it).
+    """
+    config = ctx.config
+    modes = {cfg.tag: resolve_spectral_mode(cfg, config) for cfg in img_configs}
+    details: dict = {"modes": modes}
+    has_cube = has_spectral_cube_model(config)
+    has_continuum_model = any(
+        getattr(model, "type", None) != "spectral_cube" for model in config.models
+    )
+    if has_cube and has_continuum_model and "continuum" not in modes.values():
+        details["note"] = NO_CONTINUUM_BLOCK_NOTE
+        logger.warning(NO_CONTINUUM_BLOCK_NOTE)
+    ctx.add_milestone("imaging_spectral_modes", "completed", details=details)
+    return details
+
+
 def _run_imaging_pass(
     ctx: RunContext,
     visibility_path: Path,
@@ -1145,6 +1180,7 @@ def run(config: SimConfig) -> None:
             _run_uv_coverage(ctx, visibility_path)
 
         # phase 2: batch imaging
+        _record_imaging_spectral_modes(ctx, effective_images)
         for img_config in effective_images:
             _run_imaging_pass(ctx, visibility_path, img_config, freq, center)
 
