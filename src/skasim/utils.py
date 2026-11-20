@@ -72,6 +72,7 @@ DIAMETERS = {
     "APEX": 12 * u.m,
     "ATCA": 22 * u.m,
     "CARMA": 10.4 * u.m,
+    "e-MERLIN": 25 * u.m,
     "GBT": 100 * u.m,
     "GMRT": 45 * u.m,
     "IRAM30M": 30 * u.m,
@@ -94,8 +95,10 @@ DIAMETERS = {
 
 def get_diameter(telescope_name: str):
     name = telescope_name.upper()
-    if name in DIAMETERS:
-        return DIAMETERS[name]
+    # Keys are not all upper case (e.g. "e-MERLIN"), so compare case-insensitively.
+    diameters = {key.upper(): value for key, value in DIAMETERS.items()}
+    if name in diameters:
+        return diameters[name]
     if "SKA" in name or "SKA1" in name:
         if "LOW" in name:
             return DIAMETERS["SKA1LOW"]

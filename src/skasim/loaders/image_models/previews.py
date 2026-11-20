@@ -618,42 +618,29 @@ def _preview_cmap():
 _COMPOSITION_COLORS = ("#66c2a5", "#fc8d62", "#8da0cb", "#e78ac3", "#a6d854")
 _COMPOSITION_STYLES = ("-", "--", "-.", ":", (0, (5, 1, 1, 1)))
 
-_COMPOSITION_RC = {
-    "font.family": "serif",
-    # cmr10 ships with Matplotlib; it needs mathtext tick labels for the minus.
-    "font.serif": ["cmr10", "CMU Serif", "DejaVu Serif"],
-    "mathtext.fontset": "cm",
-    "axes.formatter.use_mathtext": True,
-    "axes.unicode_minus": True,
-    "font.size": 11,
-    "axes.labelsize": 12,
-    "legend.fontsize": 9.5,
-    "axes.linewidth": 0.8,
-    "xtick.direction": "in",
-    "ytick.direction": "in",
-    "xtick.top": True,
-    "ytick.right": True,
-    "xtick.minor.visible": True,
-    "ytick.minor.visible": True,
-    "xtick.major.size": 6,
-    "ytick.major.size": 6,
-    "xtick.minor.size": 3,
-    "ytick.minor.size": 3,
-    "xtick.major.width": 0.8,
-    "ytick.major.width": 0.8,
-    "xtick.minor.width": 0.6,
-    "ytick.minor.width": 0.6,
-    "legend.frameon": False,
-    "axes.grid": False,
-}
 
 
 _COMPOSITION_TYPE_LABELS = {
-    "continuum_i_alpha": r"CONTINUUM $I,\,\alpha$",
-    "static_stokes_maps": "STOKES MAPS",
-    "casa_taylor_terms": "TAYLOR TERMS",
-    "spectral_cube": "LINE CUBE",
+    "continuum_i_alpha": r"continuum $I,\,\alpha$",
+    "static_stokes_maps": "Stokes maps",
+    "casa_taylor_terms": "Taylor terms",
+    "spectral_cube": "line cube",
 }
+
+
+def _offsets_arcmin(center: SkyCoord, coords: SkyCoord):
+    """Return the (east, north) offsets of ``coords`` from ``center`` in arcmin.
+
+    Both are reduced to plain ICRS first. ``spherical_offsets_to`` rejects
+    coordinates whose frame attributes differ, and a model WCS in FK5 (or
+    Galactic) keeps attributes such as its equinox after ``.icrs``.
+    """
+    origin = center.icrs
+    target = coords.icrs
+    origin = SkyCoord(origin.ra, origin.dec, frame="icrs")
+    target = SkyCoord(target.ra, target.dec, frame="icrs")
+    east, north = origin.spherical_offsets_to(target)
+    return east.to(u.arcmin).value, north.to(u.arcmin).value
 
 
 def _cube_emission_offsets(path: Path, center: SkyCoord):
@@ -675,8 +662,8 @@ def _cube_emission_offsets(path: Path, center: SkyCoord):
         return None
     ny, nx = mask.shape
     yy, xx = np.mgrid[0:ny, 0:nx]
-    east, north = center.icrs.spherical_offsets_to(wcs.pixel_to_world(xx, yy).icrs)
-    return east.to(u.arcmin).value, north.to(u.arcmin).value, mask
+    east, north = _offsets_arcmin(center, wcs.pixel_to_world(xx, yy))
+    return east, north, mask
 
 
 def _footprint_outline(header: fits.Header, center: SkyCoord, n_edge: int = 40):
@@ -701,10 +688,7 @@ def _footprint_outline(header: fits.Header, center: SkyCoord, n_edge: int = 40):
             y1 - (y1 - y0) * t,
         ]
     )
-    # spherical_offsets_to needs both in one frame (model WCS may be Galactic)
-    world = wcs.pixel_to_world(xs, ys).icrs
-    east, north = center.icrs.spherical_offsets_to(world)
-    return east.to(u.arcmin).value, north.to(u.arcmin).value
+    return _offsets_arcmin(center, wcs.pixel_to_world(xs, ys))
 
 
 def write_sky_composition_preview(
@@ -735,197 +719,194 @@ def write_sky_composition_preview(
     field_arcmin = field_fov_deg / 2.0 * 60.0
     extent = max(field_arcmin, half_power_arcmin)
 
-    with plt.rc_context(_COMPOSITION_RC):
-        fig, ax = plt.subplots(figsize=(5.6, 5.6))
-        handles = []
+    fig, ax = plt.subplots(figsize=(5.6, 5.6))
+    handles = []
 
-        if catalogue is not None and len(catalogue[0]) > 0:
-            ra, dec, flux = (np.asarray(a, dtype=float) for a in catalogue)
-            coords = SkyCoord(ra * u.deg, dec * u.deg)
-            east, north = center.spherical_offsets_to(coords)
-            east, north = east.to(u.arcmin).value, north.to(u.arcmin).value
-            inside = (np.abs(east) <= 1.15 * extent) & (np.abs(north) <= 1.15 * extent)
-            finite = np.where(np.isfinite(flux) & (flux > 0), flux, np.nan)
-            peak = np.nanmax(finite) if np.any(np.isfinite(finite)) else 1.0
-            sizes = 6.0 + 60.0 * np.sqrt(np.nan_to_num(finite / peak, nan=0.0))
-            ax.scatter(
-                east[inside],
-                north[inside],
-                s=sizes[inside],
-                facecolor="steelblue",
-                edgecolor="black",
-                linewidth=0.4,
-                zorder=3,
+    if catalogue is not None and len(catalogue[0]) > 0:
+        ra, dec, flux = (np.asarray(a, dtype=float) for a in catalogue)
+        east, north = _offsets_arcmin(center, SkyCoord(ra * u.deg, dec * u.deg))
+        inside = (np.abs(east) <= 1.15 * extent) & (np.abs(north) <= 1.15 * extent)
+        finite = np.where(np.isfinite(flux) & (flux > 0), flux, np.nan)
+        peak = np.nanmax(finite) if np.any(np.isfinite(finite)) else 1.0
+        sizes = 6.0 + 60.0 * np.sqrt(np.nan_to_num(finite / peak, nan=0.0))
+        ax.scatter(
+            east[inside],
+            north[inside],
+            s=sizes[inside],
+            facecolor="steelblue",
+            edgecolor="black",
+            linewidth=0.4,
+            zorder=3,
+        )
+        handles.append(
+            Line2D(
+                [],
+                [],
+                linestyle="none",
+                marker="o",
+                markerfacecolor="steelblue",
+                markeredgecolor="black",
+                markeredgewidth=0.4,
+                label=f"catalogue ({int(np.count_nonzero(inside))} sources)",
             )
-            handles.append(
-                Line2D(
-                    [],
-                    [],
-                    linestyle="none",
-                    marker="o",
-                    markerfacecolor="steelblue",
-                    markeredgecolor="black",
-                    markeredgewidth=0.4,
-                    label=f"CATALOGUE ({int(np.count_nonzero(inside))} sources)",
-                )
-            )
+        )
 
-        for index, entry in enumerate(entries):
-            path = primary_model_fits_path(entry)
-            if path is None:
-                continue
+    for index, entry in enumerate(entries):
+        path = primary_model_fits_path(entry)
+        if path is None:
+            continue
+        try:
+            header = fits.getheader(path)
+            east, north = _footprint_outline(header, center)
+        except Exception as exc:
+            logger.warning(f"sky composition: cannot outline {path}: {exc}")
+            continue
+        color = _COMPOSITION_COLORS[index % len(_COMPOSITION_COLORS)]
+        style = _COMPOSITION_STYLES[index % len(_COMPOSITION_STYLES)]
+        is_cube = isinstance(entry, SpectralCubeModelEntry)
+        if is_cube:
+            # Cube grid as a thin outline; its line emission (moment-0
+            # extent) filled, so the line source stands out from the grid.
             try:
-                header = fits.getheader(path)
-                east, north = _footprint_outline(header, center)
+                emission = _cube_emission_offsets(path, center)
             except Exception as exc:
-                logger.debug(f"sky composition: cannot outline {path}: {exc}")
-                continue
-            color = _COMPOSITION_COLORS[index % len(_COMPOSITION_COLORS)]
-            style = _COMPOSITION_STYLES[index % len(_COMPOSITION_STYLES)]
-            is_cube = isinstance(entry, SpectralCubeModelEntry)
-            if is_cube:
-                # Cube grid as a thin outline; its line emission (moment-0
-                # extent) filled, so the line source stands out from the grid.
-                try:
-                    emission = _cube_emission_offsets(path, center)
-                except Exception as exc:
-                    logger.debug(f"sky composition: no moment-0 for {path}: {exc}")
-                    emission = None
-                if emission is not None:
-                    ax.contourf(
-                        emission[0],
-                        emission[1],
-                        emission[2].astype(float),
-                        levels=[0.5, 1.5],
-                        colors=[color],
-                        alpha=0.55,
-                        zorder=3,
-                    )
-                    ax.contour(
-                        emission[0],
-                        emission[1],
-                        emission[2].astype(float),
-                        levels=[0.5],
-                        colors=[color],
-                        linewidths=1.4,
-                        zorder=3,
-                    )
-            else:
-                ax.fill(east, north, color=color, alpha=0.25, linewidth=0, zorder=2)
-            ax.plot(
-                east,
-                north,
+                logger.debug(f"sky composition: no moment-0 for {path}: {exc}")
+                emission = None
+            if emission is not None:
+                ax.contourf(
+                    emission[0],
+                    emission[1],
+                    emission[2].astype(float),
+                    levels=[0.5, 1.5],
+                    colors=[color],
+                    alpha=0.55,
+                    zorder=3,
+                )
+                ax.contour(
+                    emission[0],
+                    emission[1],
+                    emission[2].astype(float),
+                    levels=[0.5],
+                    colors=[color],
+                    linewidths=1.4,
+                    zorder=3,
+                )
+        else:
+            ax.fill(east, north, color=color, alpha=0.25, linewidth=0, zorder=2)
+        ax.plot(
+            east,
+            north,
+            color=color,
+            linestyle=style,
+            linewidth=1.0 if is_cube else 1.4,
+            zorder=2,
+        )
+        extent = max(
+            extent, float(np.max(np.abs(east))), float(np.max(np.abs(north)))
+        )
+        handles.append(
+            Line2D(
+                [],
+                [],
                 color=color,
                 linestyle=style,
-                linewidth=1.0 if is_cube else 1.4,
-                zorder=2,
-            )
-            extent = max(
-                extent, float(np.max(np.abs(east))), float(np.max(np.abs(north)))
-            )
-            handles.append(
-                Line2D(
-                    [],
-                    [],
-                    color=color,
-                    linestyle=style,
-                    linewidth=1.4,
-                    label=f"{'CUBE' if is_cube else 'IMAGE'} {index}: "
-                    + _COMPOSITION_TYPE_LABELS.get(
-                        entry.type, entry.type.replace("_", " ").upper()
-                    ),
-                )
-            )
-
-        ax.add_patch(
-            Circle(
-                (0.0, 0.0),
-                half_power_arcmin,
-                fill=False,
-                color="black",
-                linestyle="--",
-                linewidth=1.0,
-                zorder=1,
+                linewidth=1.4,
+                label=f"{'cube' if is_cube else 'image'} {index}: "
+                + _COMPOSITION_TYPE_LABELS.get(
+                    entry.type, entry.type.replace("_", " ")
+                ),
             )
         )
-        ax.add_patch(
-            Circle(
-                (0.0, 0.0),
-                field_arcmin,
-                fill=False,
-                color="black",
-                linestyle=":",
-                linewidth=1.0,
-                zorder=1,
-            )
-        )
-        ax.plot(0.0, 0.0, marker="+", color="crimson", markersize=11, mew=1.4, zorder=4)
-        handles += [
-            Line2D(
-                [],
-                [],
-                color="black",
-                linestyle="--",
-                linewidth=1.0,
-                label="BEAM HALF POWER",
-            ),
-            Line2D(
-                [],
-                [],
-                color="black",
-                linestyle=":",
-                linewidth=1.0,
-                label="SIMULATION FIELD",
-            ),
-            Line2D(
-                [],
-                [],
-                color="crimson",
-                linestyle="none",
-                marker="+",
-                markersize=9,
-                mew=1.4,
-                label="PHASE CENTRE",
-            ),
-        ]
 
-        lim = 1.12 * extent
-        ax.set_xlim(lim, -lim)  # east to the left
-        ax.set_ylim(-lim, lim)
-        ax.set_aspect("equal")
-        ax.set_xlabel(r"$\Delta\alpha\,\cos\delta$ (arcmin)")
-        ax.set_ylabel(r"$\Delta\delta$ (arcmin)")
+    ax.add_patch(
+        Circle(
+            (0.0, 0.0),
+            half_power_arcmin,
+            fill=False,
+            color="black",
+            linestyle="--",
+            linewidth=1.0,
+            zorder=1,
+        )
+    )
+    ax.add_patch(
+        Circle(
+            (0.0, 0.0),
+            field_arcmin,
+            fill=False,
+            color="black",
+            linestyle=":",
+            linewidth=1.0,
+            zorder=1,
+        )
+    )
+    ax.plot(0.0, 0.0, marker="+", color="crimson", markersize=11, mew=1.4, zorder=4)
+    handles += [
+        Line2D(
+            [],
+            [],
+            color="black",
+            linestyle="--",
+            linewidth=1.0,
+            label="beam half power",
+        ),
+        Line2D(
+            [],
+            [],
+            color="black",
+            linestyle=":",
+            linewidth=1.0,
+            label="simulation field",
+        ),
+        Line2D(
+            [],
+            [],
+            color="crimson",
+            linestyle="none",
+            marker="+",
+            markersize=9,
+            mew=1.4,
+            label="phase centre",
+        ),
+    ]
+
+    lim = 1.12 * extent
+    ax.set_xlim(lim, -lim)  # east to the left
+    ax.set_ylim(-lim, lim)
+    ax.set_aspect("equal")
+    ax.set_xlabel(r"$\Delta\alpha\,\cos\delta$ (arcmin)")
+    ax.set_ylabel(r"$\Delta\delta$ (arcmin)")
+    ax.text(
+        0.03,
+        0.97,
+        f"{beam.ref_freq_hz / 1e6:.1f} MHz",
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+    )
+    if phase_centre_rule:
         ax.text(
             0.03,
-            0.97,
-            f"{beam.ref_freq_hz / 1e6:.1f} MHz",
+            0.03,
+            f"phase centre: {phase_centre_rule.replace('_', ' ')}",
             transform=ax.transAxes,
             ha="left",
-            va="top",
+            va="bottom",
+            fontsize=10,
         )
-        if phase_centre_rule:
-            ax.text(
-                0.03,
-                0.03,
-                f"phase centre: {phase_centre_rule.replace('_', ' ')}",
-                transform=ax.transAxes,
-                ha="left",
-                va="bottom",
-                fontsize=10,
-            )
-        # The field is full of data, so the legend sits under the axes.
-        ax.legend(
-            handles=handles,
-            loc="upper center",
-            bbox_to_anchor=(0.5, -0.13),
-            ncol=2,
-            handlelength=2.2,
-            columnspacing=1.6,
-        )
-        png_name = f"{ctx.work_dir.name}_sky_composition.png"
-        png_path = ctx.work_dir / png_name
-        fig.savefig(png_path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
+    # The field is full of data, so the legend sits under the axes.
+    ax.legend(
+        handles=handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.13),
+        ncol=2,
+        handlelength=2.2,
+        columnspacing=1.6,
+    )
+    png_name = f"{ctx.work_dir.name}_sky_composition.png"
+    png_path = ctx.work_dir / png_name
+    fig.savefig(png_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
     ctx.manifest.add_output("plot", png_name, role="sky_composition")
     return png_path

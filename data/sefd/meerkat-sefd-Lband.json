@@ -1,0 +1,20 @@
+{
+  "antennas": [
+    {"name":"station001","sefd_jy":426.0},{"name":"station002","sefd_jy":426.0},{"name":"station003","sefd_jy":426.0},{"name":"station004","sefd_jy":426.0},
+    {"name":"station005","sefd_jy":426.0},{"name":"station006","sefd_jy":426.0},{"name":"station007","sefd_jy":426.0},{"name":"station008","sefd_jy":426.0},
+    {"name":"station009","sefd_jy":426.0},{"name":"station010","sefd_jy":426.0},{"name":"station011","sefd_jy":426.0},{"name":"station012","sefd_jy":426.0},
+    {"name":"station013","sefd_jy":426.0},{"name":"station014","sefd_jy":426.0},{"name":"station015","sefd_jy":426.0},{"name":"station016","sefd_jy":426.0},
+    {"name":"station017","sefd_jy":426.0},{"name":"station018","sefd_jy":426.0},{"name":"station019","sefd_jy":426.0},{"name":"station020","sefd_jy":426.0},
+    {"name":"station021","sefd_jy":426.0},{"name":"station022","sefd_jy":426.0},{"name":"station023","sefd_jy":426.0},{"name":"station024","sefd_jy":426.0},
+    {"name":"station025","sefd_jy":426.0},{"name":"station026","sefd_jy":426.0},{"name":"station027","sefd_jy":426.0},{"name":"station028","sefd_jy":426.0},
+    {"name":"station029","sefd_jy":426.0},{"name":"station030","sefd_jy":426.0},{"name":"station031","sefd_jy":426.0},{"name":"station032","sefd_jy":426.0},
+    {"name":"station033","sefd_jy":426.0},{"name":"station034","sefd_jy":426.0},{"name":"station035","sefd_jy":426.0},{"name":"station036","sefd_jy":426.0},
+    {"name":"station037","sefd_jy":426.0},{"name":"station038","sefd_jy":426.0},{"name":"station039","sefd_jy":426.0},{"name":"station040","sefd_jy":426.0},
+    {"name":"station041","sefd_jy":426.0},{"name":"station042","sefd_jy":426.0},{"name":"station043","sefd_jy":426.0},{"name":"station044","sefd_jy":426.0},
+    {"name":"station045","sefd_jy":426.0},{"name":"station046","sefd_jy":426.0},{"name":"station047","sefd_jy":426.0},{"name":"station048","sefd_jy":426.0},
+    {"name":"station049","sefd_jy":426.0},{"name":"station050","sefd_jy":426.0},{"name":"station051","sefd_jy":426.0},{"name":"station052","sefd_jy":426.0},
+    {"name":"station053","sefd_jy":426.0},{"name":"station054","sefd_jy":426.0},{"name":"station055","sefd_jy":426.0},{"name":"station056","sefd_jy":426.0},
+    {"name":"station057","sefd_jy":426.0},{"name":"station058","sefd_jy":426.0},{"name":"station059","sefd_jy":426.0},{"name":"station060","sefd_jy":426.0},
+    {"name":"station061","sefd_jy":426.0},{"name":"station062","sefd_jy":426.0},{"name":"station063","sefd_jy":426.0},{"name":"station064","sefd_jy":426.0}
+  ]
+}

@@ -1,0 +1,1232 @@
+{
+  "antennas": [
+    {
+      "name": "station001",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station002",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station003",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station004",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station005",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station006",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station007",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station008",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station009",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station010",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station011",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station012",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station013",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station014",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station015",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station016",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station017",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station018",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station019",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station020",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station021",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station022",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station023",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station024",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station025",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station026",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station027",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station028",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station029",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station030",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station031",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station032",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station033",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station034",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station035",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station036",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station037",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station038",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station039",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station040",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station041",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station042",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station043",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station044",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station045",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station046",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station047",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station048",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station049",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station050",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station051",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station052",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station053",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station054",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station055",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station056",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station057",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station058",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station059",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station060",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station061",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station062",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station063",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station064",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station065",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station066",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station067",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station068",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station069",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station070",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station071",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station072",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station073",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station074",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station075",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station076",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station077",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station078",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station079",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station080",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station081",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station082",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station083",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station084",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station085",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station086",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station087",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station088",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station089",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station090",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station091",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station092",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station093",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station094",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station095",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station096",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station097",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station098",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station099",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station100",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station101",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station102",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station103",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station104",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station105",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station106",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station107",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station108",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station109",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station110",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station111",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station112",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station113",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station114",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station115",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station116",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station117",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station118",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station119",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station120",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station121",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station122",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station123",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station124",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station125",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station126",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station127",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station128",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station129",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station130",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station131",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station132",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station133",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station134",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station135",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station136",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station137",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station138",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station139",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station140",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station141",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station142",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station143",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station144",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station145",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station146",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station147",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station148",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station149",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station150",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station151",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station152",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station153",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station154",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station155",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station156",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station157",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station158",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station159",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station160",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station161",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station162",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station163",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station164",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station165",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station166",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station167",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station168",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station169",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station170",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station171",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station172",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station173",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station174",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station175",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station176",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station177",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station178",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station179",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station180",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station181",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station182",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station183",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station184",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station185",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station186",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station187",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station188",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station189",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station190",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station191",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station192",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station193",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station194",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station195",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station196",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station197",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station198",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station199",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station200",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station201",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station202",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station203",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station204",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station205",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station206",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station207",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station208",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station209",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station210",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station211",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station212",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station213",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station214",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station215",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station216",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station217",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station218",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station219",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station220",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station221",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station222",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station223",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station224",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station225",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station226",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station227",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station228",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station229",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station230",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station231",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station232",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station233",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station234",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station235",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station236",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station237",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station238",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station239",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station240",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station241",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station242",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station243",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station244",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station245",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station246",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station247",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station248",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station249",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station250",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station251",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station252",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station253",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station254",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station255",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station256",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station257",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station258",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station259",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station260",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station261",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station262",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station263",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station264",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station265",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station266",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station267",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station268",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station269",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station270",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station271",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station272",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station273",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station274",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station275",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station276",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station277",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station278",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station279",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station280",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station281",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station282",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station283",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station284",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station285",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station286",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station287",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station288",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station289",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station290",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station291",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station292",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station293",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station294",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station295",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station296",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station297",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station298",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station299",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station300",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station301",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station302",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station303",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station304",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station305",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station306",
+      "sefd_jy": 5283.2201
+    },
+    {
+      "name": "station307",
+      "sefd_jy": 5283.2201
+    }
+  ]
+}

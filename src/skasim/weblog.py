@@ -283,6 +283,22 @@ def _observation_summary(manifest: RunManifest) -> dict:
     integration_time = None
     if n_timesteps:
         integration_time = float(obs.observation_time_s) / float(n_timesteps)
+
+    # realistic noise injection summary (if enabled)
+    noise_cfg = manifest.config.noise_injection
+    noise_enabled = getattr(noise_cfg, "enabled", False)
+    noise_summary = None
+    if noise_enabled:
+        ms_details = _find_milestone_details(manifest, "noise_injection_completed")
+        noise_summary = {
+            "enabled": True,
+            "eta_c": getattr(noise_cfg, "eta_c", 0.88),
+            "sefd_file": getattr(noise_cfg, "sefd_file", None),
+            "min_sigma_jy": (ms_details.get("summary") or {}).get("min_sigma_jy"),
+            "max_sigma_jy": (ms_details.get("summary") or {}).get("max_sigma_jy"),
+            "mean_sigma_jy": (ms_details.get("summary") or {}).get("mean_sigma_jy"),
+        }
+
     return {
         "band_edge_min_mhz": _format_float(min_freq),
         "band_edge_max_mhz": _format_float(max_freq),
@@ -296,6 +312,7 @@ def _observation_summary(manifest: RunManifest) -> dict:
             _format_float(integration_time) if integration_time is not None else None
         ),
         "n_timesteps": n_timesteps,
+        "noise_summary": noise_summary,
     }
 
 

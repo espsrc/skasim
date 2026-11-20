@@ -41,6 +41,13 @@ skasim.sky
    :members:
    :show-inheritance:
 
+skasim.noise
+------------
+
+.. automodule:: skasim.noise
+   :members:
+   :show-inheritance:
+
 skasim.manifest
 ---------------
 

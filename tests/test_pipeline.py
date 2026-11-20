@@ -294,6 +294,11 @@ def test_run_spectral_cube_pipeline_calls_wsclean_and_logs_summary(
 
         cube_path = tmp_path / "cube.fits"
         _write_minimal_fits_cube(cube_path, n_channels=8)
+        # Put the file where the mocked header and the phase centre are (ICRS
+        # 10, 20 deg); the minimal cube is Galactic, ~120 deg away from there.
+        with fits.open(cube_path, mode="update") as hdul:
+            hdul[0].header["CTYPE1"] = "RA---SIN"
+            hdul[0].header["CTYPE2"] = "DEC--SIN"
         config = SimConfig(
             output_dir="spectral_run",
             models=[
@@ -1503,8 +1508,13 @@ def test_record_sky_layout_records_deciding_cube_and_draws_it(tmp_path):
 
     matplotlib.use("Agg", force=True)
     cube = _sin_cube(tmp_path, "hi", (150.0, 2.0))
+    image = _sin_model(tmp_path, "img", (150.0, 2.0))
+    alpha = _sin_model(tmp_path, "alpha", (150.0, 2.0))
     config = SimConfig(
-        models=[{"type": "spectral_cube", "cube": str(cube)}],
+        models=[
+            {"type": "spectral_cube", "cube": str(cube)},
+            _continuum(image, alpha),
+        ],
         output_dir=str(tmp_path / "run"),
     )
     ctx = create_run_context(config)
@@ -1523,3 +1533,65 @@ def test_record_sky_layout_records_deciding_cube_and_draws_it(tmp_path):
     assert "sky_composition_preview_failed" not in [
         m.name for m in ctx.manifest.milestones
     ]
+
+
+@pytest.mark.parametrize("kind", ["continuum", "cube"])
+def test_record_sky_layout_skips_composition_panel_for_one_input(tmp_path, kind):
+    """A single image model has nothing to combine, so no combined view."""
+    from skasim.pipeline import _record_sky_layout
+
+    if kind == "cube":
+        model = {"type": "spectral_cube", "cube": str(_sin_cube(tmp_path, "hi", (150.0, 2.0)))}
+    else:
+        model = _continuum(
+            _sin_model(tmp_path, "img", (150.0, 2.0)),
+            _sin_model(tmp_path, "alpha", (150.0, 2.0)),
+        )
+    config = SimConfig(models=[model], output_dir=str(tmp_path / "run"))
+    ctx = create_run_context(config)
+
+    _record_sky_layout(ctx, SkyCoord(150.0, 2.0, unit="deg"), 0.5 * u.deg, 1420 * u.MHz)
+
+    names = [m.name for m in ctx.manifest.milestones]
+    assert "image_model_footprints" in names
+    assert not [o for o in ctx.manifest.outputs if o.role == "sky_composition"]
+
+
+def test_record_sky_layout_rejects_model_beyond_90_deg(tmp_path):
+    """A model the phase-centre SIN grid cannot reach fails early and clearly."""
+    from skasim.pipeline import _record_sky_layout
+
+    # cube at RA 10 deg, phase centre at RA 150 deg (10h): ~124 deg apart
+    cube = _sin_cube(tmp_path, "hi", (10.0, 20.0))
+    config = SimConfig(
+        center="10h00m00s +20d00m00s",
+        models=[{"type": "spectral_cube", "cube": str(cube)}],
+        output_dir=str(tmp_path / "run"),
+    )
+    ctx = create_run_context(config)
+
+    with pytest.raises(ValueError, match=r"within 90 deg.*Check 'center'") as exc:
+        _record_sky_layout(
+            ctx, SkyCoord(150.0, 20.0, unit="deg"), 0.5 * u.deg, 1420 * u.MHz
+        )
+
+    assert "RA 10.0000 deg, Dec 20.0000 deg" in str(exc.value)
+    # the footprints are still recorded for the failure weblog
+    assert "image_model_footprints" in [m.name for m in ctx.manifest.milestones]
+
+
+def test_footprint_outline_accepts_fk5_model(tmp_path):
+    """An FK5 (EQUINOX 2000) model is outlined, not dropped for a frame mismatch."""
+    from skasim.loaders.image_models.previews import _footprint_outline
+
+    path = _sin_model(tmp_path, "fk5", (150.0, 2.0), n=32, cdelt_deg=1e-3)
+    with fits.open(path, mode="update") as hdul:
+        hdul[0].header["RADESYS"] = "FK5"
+        hdul[0].header["EQUINOX"] = 2000.0
+    header = fits.getheader(path)
+
+    east, north = _footprint_outline(header, SkyCoord(150.0, 2.0, unit="deg"))
+
+    # 32 pixels of 1e-3 deg: the edges sit ~16 px = 0.96 arcmin from the centre
+    assert np.all(np.isfinite(east)) and np.all(np.isfinite(north))
+    assert np.max(np.abs(north)) == pytest.approx(0.96, abs=0.01)

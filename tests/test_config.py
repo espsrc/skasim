@@ -687,3 +687,66 @@ def test_resolve_spectral_mode(tmp_path, imager, mode, with_cube, expected):
     cfg = SimConfig(models=models, imaging=[img])
 
     assert resolve_spectral_mode(cfg.imaging[0], cfg) == expected
+
+
+# ---------------------------------------------------------------------------
+# NoiseInjectionConfig
+# ---------------------------------------------------------------------------
+
+
+def test_noise_injection_defaults():
+    """Noise injection is disabled by default."""
+    cfg = SimConfig()
+    assert cfg.noise_injection.enabled is False
+    assert cfg.noise_injection.sefd_file is None
+    assert cfg.noise_injection.eta_c == pytest.approx(0.88)
+
+
+def test_noise_injection_accepts_nested_config(tmp_path):
+    """Noise injection can be enabled through a nested block."""
+    sefd_path = tmp_path / "sefd.json"
+    sefd_path.write_text('{"telescope": "T", "band": "L", "antennas": []}')
+    # antenna list is empty, but loader validation is deferred to runtime
+    cfg = SimConfig(
+        noise_injection={
+            "enabled": True,
+            "sefd_file": str(sefd_path),
+            "eta_c": 0.9,
+        },
+        imaging=[ImgConfig(tag="default", imager="wsclean", pixels=64)],
+    )
+    assert cfg.noise_injection.enabled is True
+    assert cfg.noise_injection.sefd_file == str(sefd_path)
+    assert cfg.noise_injection.eta_c == pytest.approx(0.9)
+
+
+def _sefd_file(tmp_path):
+    """Write a minimal one-antenna SEFD file and return its path."""
+    sefd_path = tmp_path / "sefd.json"
+    sefd_path.write_text(
+        '{"telescope": "T", "band": "L", '
+        '"antennas": [{"name": "A0", "sefd_jy": 400.0}]}'
+    )
+    return str(sefd_path)
+
+
+@pytest.mark.parametrize(
+    "oskar_noise",
+    [{"rms": True}, {"noise_rms_start": 1e-4}],
+    ids=["rms", "noise_rms_start"],
+)
+def test_noise_injection_rejects_oskar_noise(tmp_path, oskar_noise):
+    """Noise injection cannot be combined with OSKAR noise."""
+    with pytest.raises(ValidationError, match="noise_injection.enabled cannot be"):
+        SimConfig(
+            **oskar_noise,
+            noise_injection={"enabled": True, "sefd_file": _sefd_file(tmp_path)},
+            imaging=[ImgConfig(tag="default", imager="wsclean", pixels=64)],
+        )
+
+
+def test_noise_injection_reports_missing_sefd_file(tmp_path):
+    """A missing SEFD file is reported as such, not as a model file."""
+    missing = tmp_path / "missing_sefd.json"
+    with pytest.raises(ValidationError, match="SEFD file does not exist"):
+        SimConfig(noise_injection={"enabled": True, "sefd_file": str(missing)})

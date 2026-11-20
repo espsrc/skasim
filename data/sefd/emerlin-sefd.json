@@ -1,0 +1,32 @@
+{
+  "antennas": [
+    {
+      "name": "Defford",
+      "sefd_jy": 350
+    },
+    {
+      "name": "Cambridge",
+      "sefd_jy": 175
+    },
+    {
+      "name": "Knockin",
+      "sefd_jy": 400
+    },
+    {
+      "name": "Darnhall",
+      "sefd_jy": 450
+    },
+    {
+      "name": "Mark2",
+      "sefd_jy": 400
+    },
+    {
+      "name": "Lovell",
+      "sefd_jy": 40
+    },
+    {
+      "name": "Pickmere",
+      "sefd_jy": 400
+    }
+  ]
+}

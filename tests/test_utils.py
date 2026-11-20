@@ -88,6 +88,11 @@ def test_get_diameter_lowercase():
     assert get_diameter("ska1mid") == DIAMETERS["SKA1MID"]
 
 
+@pytest.mark.parametrize("name", ["e-MERLIN", "E-MERLIN", "e-merlin"])
+def test_get_diameter_mixed_case_key(name):
+    assert get_diameter(name) == DIAMETERS["e-MERLIN"]
+
+
 def test_get_diameter_ska_fallback_low():
     assert get_diameter("SKA1-LOW") == DIAMETERS["SKA1LOW"]
 
