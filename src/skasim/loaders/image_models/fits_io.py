@@ -163,6 +163,8 @@ def image_model_footprints(
                 "model_entry_index": index,
                 "model_type": entry.type,
                 "source": str(path),
+                "centre_ra_deg": float(centre_ra),
+                "centre_dec_deg": float(centre_dec),
                 "centre_offset_deg": offset,
                 "footprint_radius_deg": radius,
                 "beam_half_power_radius_deg": half_power_radius,

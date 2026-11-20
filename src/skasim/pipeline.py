@@ -319,6 +319,41 @@ def catalogue_beam_flux(
     }
 
 
+# Image models are placed on a SIN grid tangent at the phase centre, which is
+# undefined beyond 90 deg from it.
+MAX_IMAGE_MODEL_OFFSET_DEG = 90.0
+
+
+def _check_image_model_reach(footprints: list[dict], center: SkyCoord) -> None:
+    """Raise if an image model extends 90 deg or more from the phase centre.
+
+    Such a model cannot be projected, so it would only fail later, after the
+    simulation, with an obscure error. It usually means ``center`` does not
+    match the model's WCS.
+    """
+    too_far = [
+        record
+        for record in footprints
+        if record["footprint_radius_deg"] >= MAX_IMAGE_MODEL_OFFSET_DEG
+    ]
+    if not too_far:
+        return
+    icrs = center.icrs
+    lines = [
+        f"image model {record['model_entry_index']} ({record['model_type']}, "
+        f"{record['source']}) is centred at RA {record['centre_ra_deg']:.4f} deg, "
+        f"Dec {record['centre_dec_deg']:.4f} deg and extends "
+        f"{record['footprint_radius_deg']:.1f} deg from the phase centre"
+        for record in too_far
+    ]
+    raise ValueError(
+        f"Image models must lie within {MAX_IMAGE_MODEL_OFFSET_DEG:.0f} deg of the "
+        f"phase centre (RA {icrs.ra.deg:.4f} deg, Dec {icrs.dec.deg:.4f} deg), "
+        f"but {'; '.join(lines)}. Check 'center' in the config against the "
+        "model's WCS."
+    )
+
+
 def _record_sky_layout(
     ctx: RunContext,
     center: SkyCoord,
@@ -328,7 +363,10 @@ def _record_sky_layout(
 ) -> None:
     """Record the phase-centre rule, catalogue flux, and image-model footprints.
 
-    Also draws the combined sky-composition panel for runs with image models.
+    Raises if an image model extends 90 deg or more from the phase centre.
+    Draws the combined sky-composition panel when the run has image models and
+    at least two inputs (each catalogue entry and each image model counts as
+    one).
     """
     config = ctx.config
     beam = run_beam(fov_sim, freq)
@@ -379,6 +417,11 @@ def _record_sky_layout(
         "completed",
         details={"entries": footprints},
     )
+    _check_image_model_reach(footprints, center)
+
+    # The combined view only adds information when it combines inputs.
+    if len(entries) + len(component_model_entries(config)) < 2:
+        return
     try:
         write_sky_composition_preview(
             ctx,
