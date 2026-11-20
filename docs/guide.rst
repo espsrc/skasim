@@ -68,6 +68,9 @@ Top-level run settings:
 - ``noise_rms_start`` / ``noise_rms_end`` (Optional[float]): OSKAR station-noise
   override in Jy. When set, the simulation uses a noise ``Range`` with these
   values instead of the telescope model noise.
+- ``noise_injection`` (:class:`~skasim.config.NoiseInjectionConfig`,
+  experimental): Per-baseline thermal noise from per-antenna SEFDs, added after
+  the simulation. See :ref:`sefd-noise-injection`.
 - ``uv_coverage`` (bool): Whether to run ``shadeMS`` and produce a UV-coverage plot.
 - ``shadems_command`` (str): Command used for ``shadeMS`` (default: ``shadems``).
 - ``uv_coverage_canvas_size`` (int): Square canvas size for the UV-coverage plot.
@@ -357,6 +360,117 @@ legacy CLI flags::
 
 .. warning::
    Generated source flags are ignored if the ``models`` list is used.
+
+.. _sefd-noise-injection:
+
+SEFD-Based Noise Injection (Experimental)
+-----------------------------------------
+
+.. warning::
+   SEFD-based noise injection is a temporary, experimental feature. It will be
+   moved to Karabo and is not meant to stay in ``skasim``. Expect the
+   ``noise_injection`` block and the SEFD tables in ``data/sefd/`` to change or
+   be removed once Karabo provides this feature.
+
+Instead of OSKAR's station-noise model (``rms`` / ``noise_rms_start``), the
+pipeline can simulate noiselessly and then add thermal noise to the ``DATA``
+column of the measurement set. The noise level of each baseline follows from
+the SEFDs of its two antennas through the radiometer equation (Radcliffe et
+al. 2024, MNRAS 527, 942):
+
+.. math::
+
+   \sigma_{pq} = \frac{1}{\eta_c}
+   \sqrt{\frac{\mathrm{SEFD}_p\,\mathrm{SEFD}_q}{2\,\Delta t\,\Delta\nu}}
+
+where :math:`\Delta t` is the visibility integration time (read per row from
+the MS ``INTERVAL`` column) and :math:`\Delta\nu` is
+``observation.channel_width_mhz``. :math:`\sigma_{pq}` is the noise in the real
+*or* imaginary part of one visibility: each part gets independent Gaussian
+noise with standard deviation :math:`\sigma_{pq}`, in every channel and
+correlation.
+
+For a homogeneous array of :math:`N` antennas, total bandwidth :math:`B`,
+observing time :math:`t` and :math:`n_\mathrm{pol}` polarizations, the
+natural-weight image noise is then
+
+.. math::
+
+   \sigma_\mathrm{image} = \frac{\mathrm{SEFD}}
+   {\eta_c\sqrt{n_\mathrm{pol}\,N(N-1)\,B\,t}}
+
+Noise is injected after all sky models have been predicted into the
+visibilities and before imaging. The ``WEIGHT`` and ``SIGMA`` columns, and
+``WEIGHT_SPECTRUM`` if present, are rewritten as :math:`1/\sigma_{pq}^2` and
+:math:`\sigma_{pq}`, so imagers that use the MS weights (such as WSClean)
+weight each baseline by its real noise level. The noise is not seeded, so
+every run draws a different realization. The
+``noise_injection_completed`` milestone in the run manifest records the
+minimum, maximum and mean :math:`\sigma_{pq}`.
+
+``noise_injection`` block:
+
+- ``enabled`` (bool, default ``false``): Turn noise injection on. It cannot be
+  combined with OSKAR noise (``rms`` or ``noise_rms_start``).
+- ``sefd_file`` (Optional[str]): Path to an SEFD table. Required when
+  ``enabled`` is ``true``. Relative paths are resolved from the directory
+  ``skasim`` runs in.
+- ``eta_c`` (float, default 0.88): System (correlator) efficiency
+  :math:`\eta_c`.
+
+.. code-block:: json
+
+   {
+     "telescope": "SKA1MID",
+     "telescope_version": "AA*",
+     "observation": {
+       "frequency_mhz": 1400,
+       "bandwidth_mhz": 100,
+       "n_channels": 100,
+       "observation_time_s": 3600
+     },
+     "imaging": [{"tag": "wsclean", "imager": "wsclean", "pixels": 1024}],
+     "models": [{"type": "component_sky_model", "catalog": "MIGHTEE"}],
+     "noise_injection": {
+       "enabled": true,
+       "sefd_file": "data/sefd/ska-mid-aastar-band2-corrected-sefd.json",
+       "eta_c": 0.88
+     }
+   }
+
+**SEFD file format.** A JSON object with an ``antennas`` list. Each entry has a
+``name`` and a positive ``sefd_jy``:
+
+.. code-block:: json
+
+   {
+     "antennas": [
+       {"name": "Defford", "sefd_jy": 350},
+       {"name": "Cambridge", "sefd_jy": 175}
+     ]
+   }
+
+The list is matched to the measurement set **by position**: entry *i* is
+antenna index *i*, so the order must match the station order of the
+telescope model. Names are not checked against the MS ``ANTENNA`` table. The
+run fails if the MS refers to more antennas than the file lists.
+
+**Bundled tables** (in ``data/sefd/`` of the repository; the Docker image does
+not include them, so mount the file into the container):
+
+- ``ska-mid-aastar-band1-sefd.json``, ``ska-mid-aastar-band2-corrected-sefd.json``,
+  ``ska-mid-aastar-band5a-sefd.json``, ``ska-mid-aastar-band5b-sefd.json``:
+  SKA-Mid AA*, 144 dishes.
+- ``ska-low-aastar-200mhz-300mhzbw-sefd.json``: SKA-Low AA*, 307 stations.
+- ``meerkat-sefd-Lband.json``: MeerKAT L-band, 64 dishes.
+- ``vla-sefd-Lband.json``: VLA L-band, 27 antennas.
+- ``emerlin-sefd.json``: e-MERLIN, 7 antennas.
+
+.. note::
+   In the SKA-Mid band 5a/5b tables, the 64 MeerKAT dishes, which have no
+   band-5 receivers, have an SEFD of :math:`10^{12}` Jy. Their baselines get
+   near-zero weight but very large noise in ``DATA``, so image these runs with
+   an imager that uses the MS weights, such as WSClean.
 
 Multi-Imaging Runs
 ------------------
