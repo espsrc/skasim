@@ -1076,17 +1076,29 @@ def _wsclean_channel_image(path, freq_hz, width_hz, value):
     """A per-channel image as WSClean writes it: its own one-pixel FREQ axis."""
     header = fits.Header()
     header["CTYPE1"], header["CRPIX1"], header["CRVAL1"], header["CDELT1"] = (
-        "RA---SIN", 2.0, 10.0, -1e-3
+        "RA---SIN",
+        2.0,
+        10.0,
+        -1e-3,
     )
     header["CTYPE2"], header["CRPIX2"], header["CRVAL2"], header["CDELT2"] = (
-        "DEC--SIN", 2.0, 2.0, 1e-3
+        "DEC--SIN",
+        2.0,
+        2.0,
+        1e-3,
     )
     header["CTYPE3"], header["CRPIX3"], header["CRVAL3"], header["CDELT3"] = (
-        "FREQ", 1.0, freq_hz, width_hz
+        "FREQ",
+        1.0,
+        freq_hz,
+        width_hz,
     )
     header["CUNIT3"] = "Hz"
     header["CTYPE4"], header["CRPIX4"], header["CRVAL4"], header["CDELT4"] = (
-        "STOKES", 1.0, 1.0, 1.0
+        "STOKES",
+        1.0,
+        1.0,
+        1.0,
     )
     data = np.full((1, 1, 3, 3), value, dtype=np.float32)
     fits.writeto(path, data, header, overwrite=True)
