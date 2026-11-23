@@ -641,6 +641,168 @@ def test_write_fits_preview_uses_aplpy_cmasher_renderer(tmp_path):
     assert png_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
+def _wsclean_like_image(path, n, *, cd_matrix=False):
+    """Write an n x n WSClean-style 4D image (RA, Dec, FREQ, STOKES) with point sources."""
+    rng = np.random.default_rng(0)
+    data = rng.normal(0.0, 1.0e-5, (1, 1, n, n)).astype(np.float32)
+    data[0, 0, n // 8 :: n // 4, n // 8 :: n // 4] = 1.0e-2
+    header = fits.Header()
+    header["CTYPE1"] = "RA---SIN"
+    header["CTYPE2"] = "DEC--SIN"
+    header["CTYPE3"] = "FREQ"
+    header["CTYPE4"] = "STOKES"
+    header["CRVAL1"] = 150.0
+    header["CRVAL2"] = 2.0
+    header["CRVAL3"] = 1.4e9
+    header["CRVAL4"] = 1.0
+    header["CRPIX1"] = n / 2 + 1
+    header["CRPIX2"] = n / 2 + 1
+    header["CRPIX3"] = 1.0
+    header["CRPIX4"] = 1.0
+    if cd_matrix:
+        header["CD1_1"] = -1.0 / 3600.0
+        header["CD2_2"] = 1.0 / 3600.0
+        header["CD3_3"] = 1.0e6
+        header["CD4_4"] = 1.0
+    else:
+        header["CDELT1"] = -1.0 / 3600.0
+        header["CDELT2"] = 1.0 / 3600.0
+        header["CDELT3"] = 1.0e6
+        header["CDELT4"] = 1.0
+    header["BUNIT"] = "Jy/beam"
+    header["BMAJ"] = 3.0 / 3600.0
+    header["BMIN"] = 3.0 / 3600.0
+    header["BPA"] = 0.0
+    fits.writeto(path, data, header, overwrite=True)
+    return data[0, 0], header
+
+
+@pytest.mark.parametrize("cd_matrix", [False, True])
+def test_preview_hdu_downsampling_keeps_sky_geometry(cd_matrix, tmp_path):
+    """Block-averaged preview pixels stay on the sky positions of their blocks."""
+    from skasim.imaging import _make_2d_preview_hdu
+
+    # 10 px with a 4 px limit -> factor 3, padded to 12 px (4 x 4 blocks)
+    data, header = _wsclean_like_image(tmp_path / "img.fits", 10, cd_matrix=cd_matrix)
+
+    hdu = _make_2d_preview_hdu(data, header, max_pixels=4)
+
+    assert hdu.data.shape == (4, 4)
+    np.testing.assert_allclose(hdu.data[0, 0], data[0:3, 0:3].mean(), rtol=1e-5)
+    # the last block holds a single real pixel; the padding is ignored
+    np.testing.assert_allclose(hdu.data[3, 3], data[9, 9], rtol=1e-5)
+
+    full_wcs = WCS(header).celestial
+    preview_wcs = WCS(hdu.header)
+    # centre of preview pixel (i, j) == centre of full-res block (3i + 1, 3j + 1)
+    for i, j in [(0, 0), (1, 2), (3, 3)]:
+        expected = full_wcs.pixel_to_world(3 * i + 1, 3 * j + 1)
+        actual = preview_wcs.pixel_to_world(i, j)
+        assert expected.separation(actual).arcsec < 1e-6
+
+
+def test_make_2d_preview_hdu_does_not_downsample_by_default():
+    """Callers that do not ask for downsampling keep full-resolution data."""
+    from skasim.imaging import _make_2d_preview_hdu
+
+    data = np.arange(100.0).reshape(10, 10)
+    header = fits.Header()
+
+    hdu = _make_2d_preview_hdu(data, header)
+
+    assert hdu.data.shape == (10, 10)
+
+
+def test_write_fits_preview_downsamples_large_images(tmp_path, monkeypatch):
+    """APLpy never receives the full-resolution array of a large image."""
+    aplpy = pytest.importorskip("aplpy")
+    pytest.importorskip("cmasher")
+    import skasim.imaging as imaging
+
+    monkeypatch.setattr(imaging, "PREVIEW_MAX_PIXELS", 64)
+    fits_path = tmp_path / "image.fits"
+    _wsclean_like_image(fits_path, 256)
+
+    shapes = []
+
+    class SpyFITSFigure(aplpy.FITSFigure):
+        def __init__(self, data, *args, **kwargs):
+            shapes.append(data[0].data.shape)
+            super().__init__(data, *args, **kwargs)
+
+    monkeypatch.setattr(aplpy, "FITSFigure", SpyFITSFigure)
+
+    write_fits_preview(fits_path, tmp_path / "image.png", "Large image")
+
+    assert shapes == [(64, 64)]
+    assert (tmp_path / "image.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_write_fits_preview_releases_figure_before_returning(tmp_path, monkeypatch):
+    """The APLpy figure and its arrays are freed by the call, not left to the GC.
+
+    A run writes dozens of previews in one process; figures kept alive by
+    reference cycles accumulated one image's worth of memory per preview.
+    """
+    import gc
+    import weakref
+
+    aplpy = pytest.importorskip("aplpy")
+    pytest.importorskip("cmasher")
+
+    fits_path = tmp_path / "image.fits"
+    _wsclean_like_image(fits_path, 64)
+    refs = []
+
+    class SpyFITSFigure(aplpy.FITSFigure):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            refs.append(weakref.ref(self))
+            refs.append(weakref.ref(self._figure))
+
+    monkeypatch.setattr(aplpy, "FITSFigure", SpyFITSFigure)
+
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        write_fits_preview(fits_path, tmp_path / "image.png", "Image")
+        alive = [ref() is not None for ref in refs]
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+
+    assert len(refs) == 2
+    assert alive == [False, False]
+
+
+def test_write_fits_preview_renders_first_plane_of_a_cube(tmp_path, monkeypatch):
+    """A cube preview shows its first channel, read without loading the cube."""
+    aplpy = pytest.importorskip("aplpy")
+    pytest.importorskip("cmasher")
+
+    plane, header = _wsclean_like_image(tmp_path / "plane.fits", 32)
+    cube = np.stack([plane, plane + 1.0, plane + 2.0])
+    cube_header = fits.Header()
+    for key in ("CTYPE", "CRVAL", "CRPIX", "CDELT"):
+        for axis in (1, 2, 3):
+            cube_header[f"{key}{axis}"] = header[f"{key}{axis}"]
+    cube_path = tmp_path / "cube.fits"
+    fits.writeto(cube_path, cube, cube_header)
+
+    rendered = []
+
+    class SpyFITSFigure(aplpy.FITSFigure):
+        def __init__(self, data, *args, **kwargs):
+            rendered.append(np.array(data[0].data))
+            super().__init__(data, *args, **kwargs)
+
+    monkeypatch.setattr(aplpy, "FITSFigure", SpyFITSFigure)
+
+    write_fits_preview(cube_path, tmp_path / "cube.png", "Cube")
+
+    np.testing.assert_allclose(rendered[0], plane * 1000.0, rtol=1e-5)
+
+
 def test_write_psf_profile_preview_writes_png_with_x_y_cuts(tmp_path):
     """The PSF preview renders a valid PNG (2D core + x/y profile panels)."""
     from skasim.imaging import write_psf_profile_preview

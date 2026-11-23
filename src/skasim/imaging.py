@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import os
 import re
 import shlex
@@ -20,6 +21,11 @@ from .manifest import RunContext
 from .runtime import require_karabo_module
 
 SKY_MODEL_CMAP = "viridis_r"
+
+# Longest side, in pixels, of the image handed to APLpy for a PNG preview. A
+# preview PNG is ~1200 px wide, so larger images are block-averaged first:
+# rendering and contouring 8192^2 images exhausted memory in long runs.
+PREVIEW_MAX_PIXELS = 2048
 
 # --------------------------------------------------------------------------- #
 # spectral-cube imaging helpers
@@ -508,7 +514,31 @@ def write_fits_preview(
     bunit: str = "mJy/beam",
     colorbar_label: str = "mJy/beam",
 ) -> None:
-    """Write a publication-style PNG preview for a WSClean FITS image, optionally recentered."""
+    """Write a publication-style PNG preview for a WSClean FITS image, optionally recentered.
+
+    Only the first 2D plane is read. Images larger than ``PREVIEW_MAX_PIXELS``
+    are block-averaged before rendering; the colour scale and contour levels
+    come from the full-resolution plane.
+    """
+    try:
+        _render_fits_preview(
+            img_path, png_path, recenter, scale_factor, bunit, colorbar_label
+        )
+    finally:
+        # APLpy figures hold reference cycles; collect them now so a run that
+        # writes dozens of previews does not keep every image in memory.
+        gc.collect()
+
+
+def _render_fits_preview(
+    img_path: Path,
+    png_path: Path,
+    recenter: tuple[float, float, float] | None,
+    scale_factor: float,
+    bunit: str,
+    colorbar_label: str,
+) -> None:
+    """Render one FITS preview; see :func:`write_fits_preview`."""
     import matplotlib
 
     matplotlib.use("Agg", force=True)
@@ -516,28 +546,26 @@ def write_fits_preview(
     import cmasher as cmr
     import matplotlib.pyplot as plt
 
-    with fits.open(img_path) as source_hdul:
-        source_hdu = source_hdul[0]
-        data = np.asarray(source_hdu.data).squeeze()
-        while data.ndim > 2:
-            data = data[0]
+    data, header = _read_first_plane(img_path)
+    data *= scale_factor
+    data[~np.isfinite(data)] = np.nan
+    has_finite = not np.isnan(data).all()
+    if has_finite:
+        rms = float(np.nanstd(data))
+        vmin = float(np.nanmin(data))
+        vmax = float(np.nanmax(data))
+        if rms > 0:
+            vmin = max(vmin, -2.0 * rms)
+            vmax = min(vmax, 20.0 * rms)
+    else:
+        rms = 0.0
+        vmin = vmax = None
 
-        display_data = data * scale_factor
-        finite = display_data[np.isfinite(display_data)]
-        if finite.size:
-            rms = float(np.nanstd(finite))
-            vmin = float(np.nanmin(finite))
-            vmax = float(np.nanmax(finite))
-            if rms > 0:
-                vmin = max(vmin, -2.0 * rms)
-                vmax = min(vmax, 20.0 * rms)
-        else:
-            rms = 0.0
-            vmin = vmax = None
-
-        hdu = _make_2d_preview_hdu(display_data, source_hdu.header, bunit=bunit)
-        hdul = fits.HDUList([hdu])
-        fig = plt.figure(figsize=(8, 7))
+    hdu = _make_2d_preview_hdu(data, header, bunit=bunit, max_pixels=PREVIEW_MAX_PIXELS)
+    del data
+    hdul = fits.HDUList([hdu])
+    fig = plt.figure(figsize=(8, 7))
+    try:
         ffig = aplpy.FITSFigure(hdul, figure=fig)
 
         if recenter:
@@ -546,9 +574,10 @@ def write_fits_preview(
 
         cmap = cmr.get_sub_cmap("cmr.rainforest", 0.30, 0.85)
         ffig.show_colorscale(cmap=cmap, vmin=vmin, vmax=vmax)
-        if rms > 0 and finite.size:
+        if rms > 0 and has_finite:
             levels = 5.0 * rms * np.sqrt(3.0) ** np.arange(1, 25)
-            drawable_levels = levels[levels <= np.nanmax(finite)]
+            # contours are drawn on the (possibly block-averaged) preview data
+            drawable_levels = levels[levels <= np.nanmax(hdu.data)]
             if drawable_levels.size:
                 try:
                     ffig.show_contour(
@@ -568,25 +597,96 @@ def write_fits_preview(
         ffig.add_colorbar()
         ffig.colorbar.set_axis_label_text(colorbar_label)
         ffig.savefig(str(png_path), dpi=150)
+    finally:
         plt.close(fig)
+
+
+def _read_first_plane(img_path: Path) -> tuple[np.ndarray, fits.Header]:
+    """Return a float copy of the first 2D plane of a FITS image, and its header.
+
+    The file is memory-mapped, so only that plane is read from a cube.
+    """
+    with fits.open(img_path, memmap=True) as hdul:
+        hdu = hdul[0]
+        header = hdu.header.copy()
+        plane = hdu.data
+        if plane is None:
+            raise ValueError(f"{img_path} has no image data")
+        plane = plane.squeeze()
+        while plane.ndim > 2:
+            plane = plane[0]
+        data = np.array(plane, dtype=np.result_type(plane.dtype, np.float32))
+        del plane
+    return data, header
 
 
 def _make_2d_preview_hdu(
     data: np.ndarray,
     header: fits.Header,
     bunit: str | None = None,
+    max_pixels: int | None = None,
 ) -> fits.PrimaryHDU:
-    """Build an in-memory 2D celestial HDU suitable for APLpy rendering."""
+    """Build an in-memory 2D celestial HDU suitable for APLpy rendering.
+
+    With ``max_pixels``, an image whose longest side exceeds it is
+    block-averaged by an integer factor, and the celestial WCS is rescaled so
+    each preview pixel sits on the sky position of its block.
+    """
+    factor = 1
+    if max_pixels is not None:
+        factor = max(1, int(np.ceil(max(data.shape) / max_pixels)))
     try:
-        preview_header = WCS(header).celestial.to_header()
+        wcs = WCS(header).celestial
+        if factor > 1:
+            _downsample_celestial_wcs(wcs, factor)
+        preview_header = wcs.to_header()
     except Exception:
         preview_header = fits.Header()
+    if factor > 1:
+        data = _block_mean(data, factor)
     for key in ("BMAJ", "BMIN", "BPA", "BUNIT", "OBJECT", "TELESCOP", "INSTRUME"):
         if key in header:
             preview_header[key] = header[key]
     if bunit is not None:
         preview_header["BUNIT"] = bunit
     return fits.PrimaryHDU(data=data, header=preview_header)
+
+
+def _downsample_celestial_wcs(wcs: WCS, factor: int) -> None:
+    """Rescale a 2D WCS in place for an image block-averaged by ``factor``.
+
+    Preview pixel p' (1-based) covers full-resolution pixels
+    ``factor * (p' - 1) + 1 .. factor * p'``, centred on
+    ``factor * (p' - 1) + (factor + 1) / 2``; hence
+    ``CRPIX' = (CRPIX - 0.5) / factor + 0.5``.
+    """
+    if wcs.wcs.has_cd():
+        wcs.wcs.cd = wcs.wcs.cd * factor
+    else:
+        wcs.wcs.cdelt = wcs.wcs.cdelt * factor
+    wcs.wcs.crpix = (wcs.wcs.crpix - 0.5) / factor + 0.5
+    wcs.wcs.set()
+
+
+def _block_mean(data: np.ndarray, factor: int) -> np.ndarray:
+    """Average ``factor x factor`` blocks of a 2D image, ignoring non-finite pixels.
+
+    The image is padded at its high ends to a multiple of ``factor``; a block
+    with no finite pixels becomes NaN.
+    """
+    ny, nx = data.shape
+    pad_y, pad_x = -ny % factor, -nx % factor
+    if pad_y or pad_x:
+        data = np.pad(data, ((0, pad_y), (0, pad_x)), constant_values=np.nan)
+    blocks = data.reshape(
+        data.shape[0] // factor, factor, data.shape[1] // factor, factor
+    )
+    valid = np.isfinite(blocks)
+    total = np.where(valid, blocks, 0.0).sum(axis=(1, 3), dtype=np.float64)
+    count = valid.sum(axis=(1, 3))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = total / count
+    return mean.astype(np.float32)
 
 
 def _gaussian_fwhm(x: np.ndarray, fwhm: float, amplitude: float = 1.0) -> np.ndarray:
