@@ -121,7 +121,7 @@ Key options:
   --bandwidth-mhz MHz         Bandwidth
   --n-channels N              Number of channels
   --channel-width-mhz MHz     Channel width
-  --observation-time SECONDS  Observation duration
+  --observation-time SECONDS  Observation duration (default 600)
   --center SEXAGESIMAL        Field centre, e.g. "10h01m35.1s 2d41m41s"
   --output-dir PATH           Exact output directory name
   --imager NAME               oskar-dirty (default) or wsclean

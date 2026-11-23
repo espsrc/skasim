@@ -215,7 +215,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         metavar="SECONDS",
         type=int,
         default=argparse.SUPPRESS,
-        help="Observation duration in seconds",
+        help="Observation duration in seconds (default: 600)",
     )
 
     imaging = p.add_argument_group("image product")
@@ -478,13 +478,16 @@ def main(argv: Optional[List[str]] = None) -> None:
         sys.exit(0)
 
     # map CLI args to SimConfig
-    obs = ObsConfig(
-        frequency_mhz=getattr(args, "frequency_mhz", 700.0),
-        bandwidth_mhz=getattr(args, "bandwidth_mhz", None),
-        n_channels=getattr(args, "n_channels", None),
-        channel_width_mhz=getattr(args, "channel_width_mhz", None),
-        observation_time_s=getattr(args, "observation_time_s", 10),
+    # pass only the flags given, so unset values take the ObsConfig defaults
+    # and the CLI and config-file entry points agree
+    obs_fields = (
+        "frequency_mhz",
+        "bandwidth_mhz",
+        "n_channels",
+        "channel_width_mhz",
+        "observation_time_s",
     )
+    obs = ObsConfig(**{f: getattr(args, f) for f in obs_fields if hasattr(args, f)})
 
     fov_deg = None
     if args.fov:

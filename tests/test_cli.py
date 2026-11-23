@@ -134,6 +134,49 @@ def test_flux_density_sets_generated_source_flux_jy(monkeypatch):
     assert captured[0].source_flux_jy == [1.0, 5.0, 10.0]
 
 
+def test_cli_observation_defaults_match_config_defaults(monkeypatch):
+    """Without observation flags the CLI uses the ObsConfig defaults.
+
+    The CLI used to default to a 10 s observation while a config file
+    defaulted to 600 s, so the same run differed by entry point.
+    """
+    captured = []
+    monkeypatch.setattr(skasim.pipeline, "run", lambda config: captured.append(config))
+
+    cli.main(["--flux-density", "1.0"])
+
+    assert captured[0].observation == ObsConfig()
+    assert captured[0].observation.observation_time_s == 600
+
+
+def test_cli_observation_flags_are_passed_through(monkeypatch):
+    """Explicit observation flags still reach the config."""
+    captured = []
+    monkeypatch.setattr(skasim.pipeline, "run", lambda config: captured.append(config))
+
+    cli.main(
+        [
+            "--flux-density",
+            "1.0",
+            "--observation-time",
+            "10",
+            "--frequency-mhz",
+            "1400",
+            "--bandwidth-mhz",
+            "64",
+            "--n-channels",
+            "4",
+        ]
+    )
+
+    obs = captured[0].observation
+    assert obs.observation_time_s == 10
+    assert obs.frequency_mhz == 1400.0
+    assert obs.bandwidth_mhz == 64.0
+    assert obs.n_channels == 4
+    assert obs.channel_width_mhz == 16.0
+
+
 def test_generated_source_stokes_flags(monkeypatch):
     """--stokes-q/u/v define generated source polarization values."""
     captured = []
