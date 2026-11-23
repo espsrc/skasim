@@ -1541,7 +1541,10 @@ def test_record_sky_layout_skips_composition_panel_for_one_input(tmp_path, kind)
     from skasim.pipeline import _record_sky_layout
 
     if kind == "cube":
-        model = {"type": "spectral_cube", "cube": str(_sin_cube(tmp_path, "hi", (150.0, 2.0)))}
+        model = {
+            "type": "spectral_cube",
+            "cube": str(_sin_cube(tmp_path, "hi", (150.0, 2.0))),
+        }
     else:
         model = _continuum(
             _sin_model(tmp_path, "img", (150.0, 2.0)),

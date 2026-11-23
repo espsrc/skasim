@@ -885,7 +885,9 @@ def run_simulation(
             if config.noise_rms_start is not None:
                 # numeric station RMS override (calibration recipe)
                 start = config.noise_rms_start
-                end = config.noise_rms_end if config.noise_rms_end is not None else start
+                end = (
+                    config.noise_rms_end if config.noise_rms_end is not None else start
+                )
                 params["noise_rms"] = "Range"
                 params["noise_rms_start"] = start
                 params["noise_rms_end"] = end
@@ -927,12 +929,14 @@ def _run_noise_injection(
 
         delta_nu_mhz = config.observation.channel_width_mhz
         if delta_nu_mhz is None:
-            raise ValueError("observation.channel_width_mhz is required for noise injection")
+            raise ValueError(
+                "observation.channel_width_mhz is required for noise injection"
+            )
         delta_nu_hz = delta_nu_mhz * 1e6
         logger.info(
             f"Injecting thermal noise: SEFD={sefd_path.name}, "
             f"eta_c={config.noise_injection.eta_c}, "
-            f"delta_nu={delta_nu_hz/1e6:.3f} MHz"
+            f"delta_nu={delta_nu_hz / 1e6:.3f} MHz"
         )
         summary = inject_noise(
             ms_path=visibility_path,
