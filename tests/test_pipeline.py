@@ -115,7 +115,11 @@ class _FakeVersions(Enum):
 def test_build_observation_centres_the_channel_grid_and_records_band_edges(
     tmp_path, monkeypatch
 ):
-    """A 1284 MHz observation spans 856--1712 MHz without shifting channels."""
+    """A 1284 MHz observation spans 856--1712 MHz without shifting channels.
+
+    OSKAR's start frequency is the centre of the first channel, not the lower
+    band edge; passing the edge shifted every channel down by half a channel.
+    """
     import skasim.pipeline as pipeline
 
     captured = {}
@@ -156,10 +160,14 @@ def test_build_observation_centres_the_channel_grid_and_records_band_edges(
     assert center.to_value(u.MHz) == pytest.approx(1284.0)
     assert n_channels == 8
     assert channel_width.to_value(u.MHz) == pytest.approx(107.0)
-    assert start_frequency.to_value(u.MHz) == pytest.approx(856.0)
-    assert captured["start_frequency_hz"] == pytest.approx(856.0e6)
+    # channel centres 909.5, 1016.5, ..., 1658.5 MHz, symmetric about 1284 MHz
+    assert start_frequency.to_value(u.MHz) == pytest.approx(909.5)
+    assert captured["start_frequency_hz"] == pytest.approx(909.5e6)
+    assert captured["frequency_increment_hz"] == pytest.approx(107.0e6)
     assert milestone.details["min_frequency_mhz"] == pytest.approx(856.0)
     assert milestone.details["max_frequency_mhz"] == pytest.approx(1712.0)
+    assert milestone.details["first_channel_centre_mhz"] == pytest.approx(909.5)
+    assert milestone.details["last_channel_centre_mhz"] == pytest.approx(1658.5)
     assert captured["start_date_and_time"] == datetime(2026, 1, 1, tzinfo=timezone.utc)
     assert milestone.details["start_time_utc"] == "2026-01-01 00:00:00"
     # no sky_center passed: it defaults to the effective centre, so no drift.

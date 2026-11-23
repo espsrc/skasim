@@ -765,6 +765,9 @@ def build_observation(
 ) -> tuple:
     """Return (observation, frequency, bandwidth, n_channels, delta_freq, start_freq).
 
+    ``start_freq`` is the centre of the first channel, as OSKAR expects; the
+    channel centres are then symmetric about ``observation.frequency_mhz``.
+
     ``sky_center`` is the sky model's own centre, before any ``SimConfig.center``
     override is applied to ``center``. When omitted it defaults to ``center``, so
     a caller that doesn't track the pre-override centre simply reports no drift.
@@ -782,8 +785,11 @@ def build_observation(
     delta_freq = df_mhz * u.MHz
     seconds = config.observation.observation_time_s
 
-    start_freq = freq - n_channels * delta_freq / 2
-    end_freq = start_freq + n_channels * delta_freq
+    band_low = freq - n_channels * delta_freq / 2
+    band_high = band_low + n_channels * delta_freq
+    # OSKAR's start_frequency_hz is the centre of the first channel
+    start_freq = band_low + delta_freq / 2
+    last_centre = start_freq + (n_channels - 1) * delta_freq
 
     # best observation time (culmination)
     obs_time = source_ref_get_best_observation_time(center, telescope)
@@ -807,8 +813,10 @@ def build_observation(
         "completed",
         details={
             "frequency_mhz": obs.frequency_mhz,
-            "min_frequency_mhz": start_freq.to(u.MHz).value,
-            "max_frequency_mhz": end_freq.to(u.MHz).value,
+            "min_frequency_mhz": band_low.to(u.MHz).value,
+            "max_frequency_mhz": band_high.to(u.MHz).value,
+            "first_channel_centre_mhz": start_freq.to(u.MHz).value,
+            "last_channel_centre_mhz": last_centre.to(u.MHz).value,
             "bandwidth_mhz": bw_mhz,
             "n_channels": n_channels,
             "channel_width_mhz": df_mhz,
@@ -1271,7 +1279,7 @@ def run(config: SimConfig) -> None:
         observation, _, bandwidth, n_channels, delta_freq, start_freq = (
             build_observation(ctx, center, telescope, sky_center=sky_center)
         )
-        logger.info(f"StartFreq : {start_freq.to(u.MHz).value:.3f} MHz")
+        logger.info(f"StartFreq : {start_freq.to_value(u.MHz):.3f} MHz (chan 0 centre)")
         logger.info(f"DeltaFreq : {delta_freq.to(u.MHz).value:.3f} MHz")
         logger.info(f"N channels: {n_channels}")
 
