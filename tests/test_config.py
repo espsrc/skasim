@@ -123,6 +123,55 @@ def test_obs_config_invalid_spectral_grid(kwargs, expected_msg):
         ObsConfig(**kwargs)
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        # zero values used to raise a bare ZeroDivisionError
+        dict(bandwidth_mhz=100.0, channel_width_mhz=0.0),
+        dict(bandwidth_mhz=100.0, n_channels=0),
+        dict(n_channels=0, channel_width_mhz=12.5),
+        dict(bandwidth_mhz=0.0, n_channels=8),
+        # negative values were accepted
+        dict(bandwidth_mhz=-100.0, n_channels=8),
+        dict(n_channels=-8, channel_width_mhz=12.5),
+        dict(n_channels=8, channel_width_mhz=-12.5),
+        # non-finite values were accepted
+        dict(bandwidth_mhz=float("nan"), n_channels=8),
+        dict(bandwidth_mhz=float("inf"), n_channels=8),
+        dict(n_channels=8, channel_width_mhz=float("nan")),
+        dict(n_channels=8, channel_width_mhz=float("inf")),
+        dict(frequency_mhz=float("inf"), n_channels=8, channel_width_mhz=12.5),
+    ],
+)
+def test_obs_config_rejects_non_positive_or_non_finite_grid(kwargs):
+    """Spectral-grid values must be finite and strictly positive."""
+    with pytest.raises(ValidationError):
+        ObsConfig(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(frequency_mhz=40.0, bandwidth_mhz=100.0, n_channels=8),
+        # a band whose lower edge is exactly 0 Hz is rejected too
+        dict(frequency_mhz=50.0, bandwidth_mhz=100.0, n_channels=8),
+        # also when the bandwidth is derived
+        dict(frequency_mhz=50.0, n_channels=10, channel_width_mhz=12.5),
+    ],
+)
+def test_obs_config_rejects_band_below_zero_frequency(kwargs):
+    """The lower band edge, frequency_mhz - bandwidth_mhz / 2, must be above 0."""
+    with pytest.raises(ValidationError, match="lower band edge"):
+        ObsConfig(**kwargs)
+
+
+def test_obs_config_accepts_band_just_above_zero_frequency():
+    """A band whose lower edge is just above 0 Hz is valid."""
+    obs = ObsConfig(frequency_mhz=50.5, bandwidth_mhz=100.0, n_channels=8)
+
+    assert obs.bandwidth_mhz == pytest.approx(100.0)
+
+
 # ---------------------------------------------------------------------------
 # ImgConfig
 # ---------------------------------------------------------------------------

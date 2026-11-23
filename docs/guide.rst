@@ -91,7 +91,9 @@ Observation parameters passed to Karabo:
 - ``bandwidth_mhz`` / ``n_channels`` / ``channel_width_mhz`` (Optional): Spectral
   grid. If all three are omitted, defaults of 100 MHz, 8 channels, and 12.5 MHz
   are applied. If two are provided, the third is derived. If all three are
-  provided, they must be consistent.
+  provided, they must be consistent. Values must be finite and positive, and
+  the lower band edge (``frequency_mhz - bandwidth_mhz / 2``) must be above
+  0 MHz.
 - ``observation_time_s`` (int, default 600): Total observing duration in seconds.
 - ``phase_center_ra_deg`` / ``phase_center_dec_deg`` (Optional[float]): Phase
   centre in degrees. When omitted, the sky model centre is used.

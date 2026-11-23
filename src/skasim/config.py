@@ -275,10 +275,10 @@ class ObsConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    frequency_mhz: float = Field(700.0, gt=0)
-    bandwidth_mhz: Optional[float] = Field(default=None)
-    n_channels: Optional[int] = Field(default=None)
-    channel_width_mhz: Optional[float] = Field(default=None)
+    frequency_mhz: float = Field(700.0, gt=0, allow_inf_nan=False)
+    bandwidth_mhz: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    n_channels: Optional[int] = Field(default=None, ge=1)
+    channel_width_mhz: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     observation_time_s: int = Field(600, gt=0)
     phase_center_ra_deg: Optional[float] = None
     phase_center_dec_deg: Optional[float] = None
@@ -296,23 +296,18 @@ class ObsConfig(BaseModel):
             self.bandwidth_mhz = _DEFAULT_BW_MHZ
             self.n_channels = _DEFAULT_NCH
             self.channel_width_mhz = _DEFAULT_DF_MHZ
-            return self
-
-        if defined == 1:
+        elif defined == 1:
             raise ValueError(
                 "at least two of bandwidth_mhz, n_channels, channel_width_mhz are required"
             )
-
-        if defined == 3:
+        elif defined == 3:
             # all provided — tolerate if mathematically consistent
             if abs(bw - nch * df) > 1e-6:
                 raise ValueError(
                     f"inconsistent grid: {bw=} ≠ {nch} × {df} = {nch * df}"
                 )
-            return self
-
         # two provided, derive the third
-        if bw is None:
+        elif bw is None:
             self.bandwidth_mhz = nch * df
         elif nch is None:
             self.n_channels = max(1, round(bw / df))
@@ -320,6 +315,13 @@ class ObsConfig(BaseModel):
         else:  # df is None
             self.channel_width_mhz = bw / nch
 
+        lower_edge_mhz = self.frequency_mhz - self.bandwidth_mhz / 2.0
+        if lower_edge_mhz <= 0:
+            raise ValueError(
+                f"lower band edge must be above 0 MHz, got {lower_edge_mhz:g} MHz "
+                f"(frequency_mhz={self.frequency_mhz:g}, "
+                f"bandwidth_mhz={self.bandwidth_mhz:g})"
+            )
         return self
 
 
