@@ -667,6 +667,31 @@ def test_build_sky_model_random_source_count(tmp_path):
     assert center is not None
 
 
+def test_build_sky_model_random_sources_stay_inside_the_field(tmp_path):
+    """Random sources scatter within 0.8 x the field around the reference.
+
+    The FoV is in degrees; reading its value as radians scattered a 1.5 deg
+    field's sources over tens of degrees.
+    """
+    fov = 1.5 * u.deg
+    config = SimConfig(source_flux_jy=[1.0] * 200)
+    ctx = _make_ctx(tmp_path, config)
+
+    sky, _ = build_sky_model(ctx, fov=fov)
+
+    # Karabo stores sources in an xarray.DataArray, which drops astropy units
+    radec = np.asarray(sky.sources[:, :2], dtype=float) * u.deg
+    reference = SkyCoord(radec[0, 0], radec[0, 1])
+    sources = SkyCoord(radec[1:, 0], radec[1:, 1])
+    d_lon, d_lat = reference.spherical_offsets_to(sources)
+    half_width = 0.4 * fov.to_value(u.deg)
+    assert np.all(np.abs(d_lon.to_value(u.deg)) <= half_width + 1e-9)
+    assert np.all(np.abs(d_lat.to_value(u.deg)) <= half_width + 1e-9)
+    # the sources do fill the box rather than collapsing onto the reference
+    assert np.abs(d_lon.to_value(u.deg)).max() > 0.5 * half_width
+    assert np.abs(d_lat.to_value(u.deg)).max() > 0.5 * half_width
+
+
 def test_build_sky_model_random_single_source(tmp_path):
     """A single intensity produces one source."""
     config = SimConfig(source_flux_jy=[42.0])

@@ -718,6 +718,8 @@ def build_sky_model(
     stokes_u = config.stokes_u_jy or [0.0] * len(intensities)
     stokes_v = config.stokes_v_jy or [0.0] * len(intensities)
     n_sources = len(intensities)
+    reference = SkyCoord(source_ref.ra, source_ref.dec)
+    half_width = 0.4 * fov  # sources fill the central 80% of the field
     sources: List[Source] = []
     for idx in range(n_sources):
         if idx == 0:
@@ -727,11 +729,14 @@ def build_sky_model(
             src.U = stokes_u[idx] * u.Jy
             src.V = stokes_v[idx] * u.Jy
         else:
-            x_coord = np.random.uniform(-fov.value / 2, fov.value / 2) * 0.8 * u.rad
-            y_coord = np.random.uniform(-fov.value / 2, fov.value / 2) * 0.8 * u.rad
+            # on-sky offsets, so the RA spread does not grow as 1/cos(dec)
+            position = reference.spherical_offsets_by(
+                np.random.uniform(-1.0, 1.0) * half_width,
+                np.random.uniform(-1.0, 1.0) * half_width,
+            )
             src = Source(
-                source_ref.ra + x_coord,
-                source_ref.dec + y_coord,
+                position.ra,
+                position.dec,
                 intensities[idx],
                 Q=stokes_q[idx] * u.Jy,
                 U=stokes_u[idx] * u.Jy,
