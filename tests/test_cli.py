@@ -177,6 +177,56 @@ def test_cli_observation_flags_are_passed_through(monkeypatch):
     assert obs.channel_width_mhz == 16.0
 
 
+@pytest.mark.parametrize(
+    "other_args",
+    [
+        ["--model", "sky.json"],
+        ["--catalog", "GLEAM"],
+        [
+            "--continuum-stokes-i",
+            "i.fits",
+            "--continuum-alpha",
+            "alpha.fits",
+            "--reference-frequency-hz",
+            "1.4e9",
+        ],
+    ],
+    ids=["model", "catalog", "continuum"],
+)
+def test_fits_image_with_another_sky_source_is_rejected(
+    monkeypatch, capsys, tmp_path, other_args
+):
+    """--fits-image plus another sky source fails instead of being dropped."""
+    monkeypatch.chdir(tmp_path)
+    for name in ("image.fits", "sky.json", "i.fits", "alpha.fits"):
+        (tmp_path / name).write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        skasim.pipeline, "run", lambda config: pytest.fail("pipeline must not run")
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["--fits-image", "image.fits", *other_args])
+
+    assert excinfo.value.code == 2
+    assert "--fits-image cannot be combined" in capsys.readouterr().err
+
+
+def test_fits_image_alone_reaches_config_with_deprecation_warning(
+    monkeypatch, tmp_path
+):
+    """--fits-image on its own still works, but is deprecated."""
+    captured = []
+    monkeypatch.setattr(skasim.pipeline, "run", lambda config: captured.append(config))
+    image = tmp_path / "image.fits"
+    image.write_text("", encoding="utf-8")
+
+    with pytest.warns(DeprecationWarning, match="fits_image is deprecated"):
+        cli.main(["--fits-image", str(image)])
+
+    assert captured[0].fits_image == str(image)
+    assert captured[0].models == []
+
+
 def test_generated_source_stokes_flags(monkeypatch):
     """--stokes-q/u/v define generated source polarization values."""
     captured = []

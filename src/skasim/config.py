@@ -577,6 +577,18 @@ class SimConfig(BaseModel):
     def _normalise_catalog(cls, value):
         return _normalise_catalog_value(value)
 
+    @field_validator("fits_image")
+    @classmethod
+    def _warn_deprecated_fits_image(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            warnings.warn(
+                "fits_image is deprecated and will be removed in a future release; "
+                "use a static_stokes_maps model entry instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return value
+
     @model_validator(mode="after")
     def _validate_one_sky_model_source(self):
         if self.models:

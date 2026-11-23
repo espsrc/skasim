@@ -684,6 +684,10 @@ def build_sky_model(
 
     # 3) FITS image ingestion (legacy path)
     if config.fits_image is not None:
+        logger.warning(
+            "fits_image is deprecated and will be removed in a future release; "
+            "use a static_stokes_maps model entry instead."
+        )
         from .loaders import FitsImageLoader
 
         fpath = Path(config.fits_image)

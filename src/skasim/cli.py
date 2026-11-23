@@ -111,7 +111,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         dest="fits_image",
         type=str,
         default=None,
-        help="FITS image file (2D continuum image)",
+        help=(
+            "FITS image file (2D continuum image). Deprecated: use a "
+            "static_stokes_maps model entry in a config file."
+        ),
     )
     sky.add_argument(
         "--catalog",
@@ -569,6 +572,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         "shadems_command": args.shadems_command,
         "uv_coverage_canvas_size": args.uv_coverage_canvas_size,
     }
+    if model_entries and args.fits_image is not None:
+        # fits_image is a legacy field and cannot sit beside typed models
+        p.error(
+            "--fits-image cannot be combined with --model, --catalog, or "
+            "--continuum-* options; provide one sky model source per run."
+        )
     if model_entries:
         config_kwargs["models"] = model_entries
     else:

@@ -58,7 +58,10 @@ Top-level run settings:
   passes, each with a unique ``tag``.
 - ``models`` (list of :class:`~skasim.config.ModelEntry`): Typed sky-model entries.
 - ``sky_file`` / ``catalog`` / ``fits_image`` (legacy): Single sky-model source
-  used when ``models`` is empty.
+  used when ``models`` is empty. ``fits_image`` (CLI ``--fits-image``) is
+  deprecated and will be removed in a future release; use a
+  ``static_stokes_maps`` model entry instead. On the CLI, ``--fits-image``
+  cannot be combined with ``--model``, ``--catalog`` or ``--continuum-*``.
 - ``source_flux_jy`` / ``stokes_q_jy`` / ``stokes_u_jy`` / ``stokes_v_jy``:
   Generated point-source mode (used when no explicit sky model is supplied).
 - ``center`` (Optional[str]): Field centre as a sexagesimal string

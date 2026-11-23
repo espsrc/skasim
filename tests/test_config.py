@@ -330,6 +330,21 @@ def test_sim_config_accepts_casa_taylor_terms_model_entry(tmp_path):
     assert cfg.source_flux_jy == []
 
 
+def test_sim_config_fits_image_is_deprecated():
+    """The legacy fits_image field warns and points to static_stokes_maps."""
+    with pytest.warns(DeprecationWarning, match="static_stokes_maps"):
+        cfg = SimConfig(fits_image="image.fits")
+
+    assert cfg.fits_image == "image.fits"
+
+
+def test_sim_config_without_fits_image_does_not_warn_about_it(recwarn):
+    """Configs that do not set fits_image get no fits_image warning."""
+    SimConfig(fits_image=None)
+
+    assert not [w for w in recwarn if "fits_image" in str(w.message)]
+
+
 def test_sim_config_explicit_telescope_version():
     """telescope with version."""
     cfg = SimConfig(telescope="SKA1LOW", telescope_version="AA0.5")

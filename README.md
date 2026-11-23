@@ -105,7 +105,7 @@ skasim --config PATH [--output-dir PATH] [--overwrite]
 Key options:
   --config PATH               JSON configuration file
   --model PATH                Sky model file: FITS, JSON, pickle, or Karabo model
-  --fits-image PATH           2D continuum FITS image
+  --fits-image PATH           2D continuum FITS image (deprecated)
   --catalog NAME              Built-in catalog: MIGHTEE, GLEAM, or SKAMid
   --continuum-stokes-i PATH   Continuum image-model Stokes I FITS
   --continuum-alpha PATH      Continuum image-model spectral-index FITS
